@@ -32,14 +32,14 @@ The batches and what each one is for:
 
 Regenerating the paper's numbers from an attachment: the archived batch
 directories under `artifacts/` are exactly what `paper/update-results.py --batch`
-expects, so copy them next to the checkout and point the Makefile at them.
+expects, so point the Makefile at them directly (no copying needed, and note that
+`/tmp` is a memory-backed tmpfs on this host — do not stage large data there).
 
 ```console
-$ cp -r artifacts/campaign-B-acceptance /tmp/cb   # acceptance/control/release/kick-off
-$ cp -r artifacts/injection-round3      /tmp/inj
-$ cp -r artifacts/replug-baseline       /tmp/rp
 $ cd paper
-$ make data RUNROOT=/tmp/cb INJECT=/tmp/inj REPLUG=/tmp/rp
+$ make data RUNROOT=../artifacts/campaign-B-acceptance \
+            INJECT=../artifacts/injection-round3 \
+            REPLUG=../artifacts/replug-baseline
 ```
 
 `make data` is phony and always regenerates `data/results.tex` (and
@@ -47,6 +47,21 @@ $ make data RUNROOT=/tmp/cb INJECT=/tmp/inj REPLUG=/tmp/rp
 `data/handover-exposure.txt`, which the same command can rebuild with
 `guest/analyze-handover-exposure.py`. A missing batch does not fail the build: the
 affected macros become `?` and the script warns.
+
+## Where the packet captures are
+
+The USB captures (`usb.pcap`, ~145 MB per run, 161 files, 20.5 GB in total) are
+**not** in this directory: they live on the network share at
+`/mnt/mt/usbvfiod-artifacts/<batch>/<run>/usb.pcap`, with their checksums in
+`/mnt/mt/usbvfiod-artifacts/SHA256SUMS-pcap`. Each batch directory here has a
+`PCAPS.md` pointing at its own subdirectory. Move them back (or to another large
+filesystem) with `scripts/archive-pcaps-to-mnt.sh`, which copies before deleting,
+de-duplicates, and wraps every access to the share in `timeout` because the
+share is served by a VM and a hung CIFS mount sleeps uninterruptibly.
+
+Nothing in the paper's evaluation needs the captures: every number is re-derived
+from the text logs that remain here. The `replug-baseline` batch has no captures
+at all, because `guest/replug-baseline.sh` does not enable packet capture.
 
 The data is not committed to git (a single run's pcap is ~130 MB). Only this
 file and `.gitignore` are tracked; the rest is delivered as an attachment.
