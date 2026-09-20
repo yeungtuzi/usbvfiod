@@ -110,6 +110,27 @@ wait_api "$RUN/dst.sock" destination || exit 1
 pids+=($!)
 sleep 2
 
+if [ "${SKIP_MIGRATION:-0}" = "1" ]; then
+  step "4/6 CONTROL RUN: no migration; the copy runs to completion"
+  MIGRATION_EPOCH=""
+  echo "" > "$RUN/migration.epoch"
+  wait_for "DEMO-COPY: MD5_DONE" "$RUN/console.log" "$COPY_TIMEOUT" || true
+  stop_vms
+  MNT="$RUN/guestfs"; mkdir -p "$MNT"
+  mount -o loop "$DIR/rootfs.img" "$MNT" 2>/dev/null && {
+    cp "$MNT/root/demo.log" "$RUN/guest-demo.log" 2>/dev/null || true; umount "$MNT"; }
+  GLOG="$RUN/guest-demo.log"
+  echo
+  echo "================ CONTROL RESULT (no migration) ================"
+  grep -aoE 'DEMO-COPY: COPY_(START|DONE) [0-9.]+( rc=[0-9]+)?' "$GLOG" | tail -2
+  awk '/COPY_START/{s=$3} /COPY_DONE/{d=$3} END{if(s&&d) printf "copy duration        : %.1f s\n", d-s}' "$GLOG"
+  echo "md5 (copy)           : $(grep -aoE '^[0-9a-f]{32}  /root/testfile.copy' "$GLOG" | awk '{print $1}' | tail -1)"
+  echo "expected             : $(awk '{print $1}' "$DIR/testfile.md5")"
+  echo "interrupt lines inst.: $(grep -ac 'interrupt line installed' "$RUN/usbvfiod.log")"
+  echo "=============================================================="
+  exit 0
+fi
+
 step "4/6 starting the live migration"
 MIGRATION_EPOCH=$(date +%s.%N)
 "$CHR" --api-socket "$RUN/src.sock" \
@@ -141,59 +162,27 @@ CLEAN="$RUN/console.clean"
 sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g' "$RUN/console.log" > "$CLEAN"
 
 echo
+GLOG="$RUN/guest-demo.log"
+
+echo "--- hand-over path evidence (server log) ---"
+echo "client handshakes         : $(grep -ac 'Received client version' "$RUN/usbvfiod.log")"
+echo "interrupt lines installed : $(grep -ac 'interrupt line installed' "$RUN/usbvfiod.log")"
+echo "stale teardowns ignored   : $(grep -ac 'ignoring IRQ disable from stale' "$RUN/usbvfiod.log")"
+
 echo "================ DEMO RESULT ================"
 echo "source process alive : $(kill -0 "$SRC_PID" 2>/dev/null && echo yes || echo no) (expected: no)"
-echo "destination state    : $(timeout 5 "$CHR" --api-socket "$RUN/dst.sock" info 2>/dev/null | grep -o '"state":"[A-Za-z]*"' | head -1 || echo '<already stopped>')"
 echo "migration line       : $(grep -o 'Migration completed.*' "$RUN/src.log" | head -1)"
-echo "migration epoch      : $MIGRATION_EPOCH"
-
-GLOG="$RUN/guest-demo.log"
-if [ -s "$GLOG" ]; then
-  echo "--- guest log markers (authoritative) ---"
-  grep -aE 'DEMO-COPY: (COPY_START|COPY_DONE|MD5_DONE|ERROR)' "$GLOG" || echo "(none)"
-  START=$(grep -aoE 'COPY_START [0-9.]+' "$GLOG" | awk '{print $2}' | tail -1)
-  DONE=$(grep -aoE 'COPY_DONE [0-9.]+' "$GLOG" | awk '{print $2}' | tail -1)
-  echo "--- copy continuity ---"
-  echo "COPY_START epoch     : ${START:-<missing>}"
-  echo "COPY_DONE  epoch     : ${DONE:-<missing>}"
-  if [ -n "$START" ] && [ -n "$DONE" ]; then
-    awk -v s="$START" -v m="$MIGRATION_EPOCH" -v d="$DONE" 'BEGIN {
-      printf "copy duration        : %.1f s\n", d - s;
-      printf "spans migration      : %s (start before, end after)\n", (s < m && d > m) ? "YES" : "NO"
-    }'
-  fi
-  echo "--- heartbeat around the migration ---"
-  grep -a 'DEMO-HEARTBEAT' "$GLOG" | head -1
-  grep -a 'DEMO-HEARTBEAT' "$GLOG" | tail -1
-  echo "heartbeat lines      : $(grep -ac 'DEMO-HEARTBEAT' "$GLOG")"
-
-  echo "--- md5 verification ---"
-  EXPECTED=$(awk '{print $1}' "$DIR/testfile.md5" 2>/dev/null)
-  SRC_MD5=$(grep -aoE '^[0-9a-f]{32}  /mnt/usb/testfile.bin' "$GLOG" | awk '{print $1}' | tail -1)
-  COPY_MD5=$(grep -aoE '^[0-9a-f]{32}  /root/testfile.copy' "$GLOG" | awk '{print $1}' | tail -1)
-  echo "expected (host)      : ${EXPECTED:-<unknown>}"
-  echo "read back from stick : ${SRC_MD5:-<missing>}"
-  echo "copied file          : ${COPY_MD5:-<missing>}"
-  if [ -n "$COPY_MD5" ] && [ "$COPY_MD5" = "$EXPECTED" ]; then
-    echo "MD5 VERDICT          : MATCH"
-  else
-    echo "MD5 VERDICT          : MISMATCH / missing"
-  fi
-  echo "--- dd tail ---"; grep -aE 'bytes .* copied|Input/output|error reading' "$GLOG" | tail -3
-else
-  echo "guest log            : NOT AVAILABLE"
-fi
-
-echo "--- guest-side USB disturbances (console) ---"
-# The xHCI driver resets its controller during probe, so the device is
-# enumerated once at boot; only enumerations after boot would indicate a
-# re-enumeration caused by the migration.
-ENUM_TIMES=$(grep -aoE '\[[[:space:]]*[0-9]+\.[0-9]+\] usb [0-9-]+: new (high|full)-speed USB device' "$CLEAN" \
-  | sed 's/^\[ *//; s/\].*//')
-echo "enumeration times    : $(echo "$ENUM_TIMES" | tr '\n' ' ')(boot enumeration is expected)"
-LATE=$(echo "$ENUM_TIMES" | awk '$1 > 30' | wc -l)
-echo "enumerations >30s    : $LATE (expected: 0 = no re-enumeration after boot)"
-grep -aiE 'xhci_hcd.*not responding|usb [0-9-]+: reset|device descriptor read|device not accepting|usb-storage.*error|Input/output error' \
-  "$CLEAN" | head -5 || echo "(no resets / no I/O errors)"
+echo "guest log            : $GLOG"
+echo "console (best effort): $RUN/console.log"
+echo
+# The verdict is computed from the guest's own log (see verdict.py): the serial
+# console can lose output exactly around the migration, because the destination
+# re-creates the serial device and resets the guest TTY.
+chmod +x "$DIR/verdict.py"
+"$DIR/verdict.py" --guest-log "$GLOG" \
+  --expected-md5 "$(awk '{print $1}' "$DIR/testfile.md5")" \
+  --migration-epoch "$MIGRATION_EPOCH"
+RC=$?
 echo "============================================"
 echo "artifacts: $RUN/{console.log,guest-demo.log,src.log,dst.log,usbvfiod.log,usb.pcap}"
+exit $RC

@@ -161,8 +161,16 @@ dd if=/mnt/usb/testfile.bin of=/root/testfile.copy bs=1M status=progress 2>> "$L
 say "DEMO-COPY: COPY_DONE $(date +%s.%N) rc=$?"
 sync
 md5sum /mnt/usb/testfile.bin /root/testfile.copy >> "$LOG" 2>&1
+# Kernel view, so that the enumeration/reset verdict can be derived from the
+# guest's own log instead of from the (unreliable) serial console.
+echo "DEMO-COPY: DMESG_BEGIN" >> "$LOG"
+dmesg >> "$LOG" 2>&1
+lsusb >> "$LOG" 2>&1
+echo "DEMO-COPY: DMESG_END" >> "$LOG"
+# Marker last, and synced, so that killing the VM cannot drop the verdict.
+echo "DEMO-COPY: MD5_DONE $(date +%s.%N)" >> "$LOG"
 sync
-say "DEMO-COPY: MD5_DONE"
+echo "DEMO-COPY: MD5_DONE $(date +%s.%N)" > /dev/ttyS0 2>/dev/null || true
 EOF
 chmod +x rootfs/usr/local/bin/demo-copy.sh
 cat > rootfs/etc/systemd/system/demo-copy.service <<'EOF'

@@ -209,6 +209,20 @@ impl EventWorker {
                 InterrupterMessage::UpdateInterruptLine(interrupt_line) => {
                     self.interrupt_line = interrupt_line;
                     debug!("Updated interrupt line");
+                    // Events that were enqueued before this message was
+                    // processed have already been written to the event ring but
+                    // were signalled on the previous line. If that line belongs
+                    // to a VMM that is going away the guest would never look at
+                    // the ring again - which is exactly what happens when a
+                    // live migration hands the device over. Kick once on the
+                    // new line so the guest re-examines the ring. The kick must
+                    // happen here, in the worker, after the earlier SendEvent
+                    // messages have been processed; doing it from the caller
+                    // thread would not order it against them.
+                    self.interrupt_line.interrupt();
+                    // Counted by the harness as evidence that the hand-over
+                    // path was exercised in a given run.
+                    info!("interrupt line installed: re-raising one interrupt to cover the hand-over window");
                 }
                 InterrupterMessage::Reset(completion) => {
                     self.reset();

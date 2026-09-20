@@ -22,9 +22,9 @@
 
 \newcommand{\code}[1]{\texttt{#1}}
 
-\title{Transparent USB Storage Passthrough across Same-Host\\
-Virtual Machine Live Migration with a Multi-Client\\
-vfio-user Backend}
+\title{Keeping a Passed-Through USB Storage Device Alive\\
+across Same-Host VM Live Migration with a\\
+Multi-Client vfio-user Backend}
 
 \author{\IEEEauthorblockN{Author Name}
 \IEEEauthorblockA{Department, University\\
@@ -39,8 +39,8 @@ Email: supervisor@example.edu}
 \maketitle
 
 \begin{abstract}
-Passing a physical USB device through to a virtual machine is attractive for
-storage, dongles and instrumentation, but it collides with live migration:
+Passing a physical USB device through to a virtual machine (VM) is attractive
+for storage, dongles and instrumentation, but it conflicts with live migration:
 the host-side device session (open file descriptors, claimed interfaces,
 endpoint state and the device's internal state) cannot be serialised, so any
 migration path that tears the session down forces the guest to re-enumerate.
@@ -49,19 +49,20 @@ This paper studies the concrete case of Cloud Hypervisor together with
 first show, by measurement, that migrating a VM with a vfio-user device
 \emph{deadlocks}: the destination blocks for $199.9$\,s inside the protocol
 version handshake because the vfio-user server accepts exactly one connection,
-which the source still owns. We then present a design that removes the
+which the source still holds. We then present a design that removes the
 deadlock without changing the VMM: because the vfio-user handshake commands
 never touch the device backend, a wrapper that takes the backend lock
 \emph{per command} rather than per connection lets a second client connect
-while the first is still attached. We identify and fix two further defects that
+while the first client is still connected. We identify and fix two further defects that
 the hand-over exposes---a departing client tearing down the surviving client's
 interrupt line and DMA mappings, and completion interrupts lost inside the
-hand-over window---and we describe a measurement harness that reads the
-verdict from the guest's own log rather than from host-side observation.
+hand-over window---a reset-capability parsing bug in the vfio-user
+crate, and we describe a measurement harness that derives the verdict from the
+guest's own log rather than from host-side observation.
 On a real 32\,GB exfat stick passed through to an Ubuntu 22.04 guest, a
 128\,MiB file copy that spans the migration completes in 10 out of 10 runs
-with a measured downtime of 4--18\,ms, byte-identical data and zero
-re-enumeration, resets or I/O errors in the guest.
+with a measured downtime of 4--18\,ms, byte-identical data and, at the USB
+level, no re-enumeration, no reset and no I/O error in the guest.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -82,7 +83,7 @@ mechanism for host maintenance, load balancing and upgrades
 
 Memory and CPU state migrate well, and kernel VFIO devices can migrate when
 the device implements the VFIO migration interface \cite{kernelvfio}. USB
-devices are the difficult case. A guest talks to a USB device through a host
+devices are the difficult case \cite{kernelusb}. A guest talks to a USB device through a host
 controller; a passthrough implementation either emulates that controller and
 forwards individual transfers, or hands the whole controller to the guest. In
 the first case the host process that owns the physical device holds a session
@@ -159,8 +160,9 @@ mainstream kernel mechanism, and modern VMMs such as Firecracker
 \cite{agache2020firecracker} and Cloud Hypervisor \cite{chrepo} implement
 variants of it. Cloud Hypervisor documents both TCP and UNIX-socket transports;
 for same-host migration it offers \code{memory\_mode=memfds}, which passes the
-guest memory \emph{backing file descriptors} over the socket so that source and
-destination map the same memory instead of copying it \cite{chlive}. This is
+guest memory \emph{backing file descriptors} (\code{memfd}, \cite{memfd}) over
+the socket so that source and destination map the same memory instead of
+copying it \cite{chlive}. This is
 the mode we use: it makes the memory identical in both VMMs, which is what
 allows a vfio-user server on the host to keep its DMA mappings.
 
@@ -178,6 +180,21 @@ side \cite{chvfiouser}; the \code{vfio\_user} crate \cite{vfiousercrate}, part
 of the rust-vmm collection \cite{rustvmmvfio}, implements both sides and is
 used by CH and by \code{usbvfiod}.
 
+Two lines of work are directly adjacent to ours. A QEMU patch series proposes
+protocol-level live migration for vfio-user devices by reusing the generic VFIO
+v2 migration infrastructure---migration data read/write and DMA logging for
+dirty-page tracking \cite{komatsu2026vfiousermig}. That is the right long-term
+answer, and it is ''not'' what this paper does: it transfers device state, which
+requires both ends to run a compatible server and does not preserve a host-side
+session that is not expressible as state. Our problem is the same-host case,
+where the server process can simply stay alive and only the VMM that talks to
+it changes; what we contribute there is the removal of the connection-level
+serialisation that otherwise makes the hand-over impossible, plus the
+hand-over correctness rules that a state-transfer design would also need. The
+second line is earlier work on migrating USB devices between hosts through a
+proxy mechanism \cite{watanabe2010usbglobal}, which likewise assumes a
+medium that carries the device rather than preserving a local session.
+
 \subsection{USB passthrough alternatives}
 Table~\ref{tab:approaches} compares the options we considered. Passing through
 with a user-space server over vfio-user is the approach of \code{usbvfiod} and
@@ -186,10 +203,10 @@ the device to an unprivileged process, at the cost of an emulated controller in
 the transfer path. USB/IP \cite{hirofuchi2005usbip,kernelusbip} tunnels USB
 traffic over a network and is the natural answer for \emph{cross-host} device
 sharing, but the device remains attached to the source host and depends on an
-external transport. QEMU's USB redirection \cite{qemuusb} and the virtio
-specification \cite{virtio12} provide guest-side USB stacks whose transport can
-in principle be made migratable, but they require a guest driver and do not
-preserve a host-side session across a migration on their own.
+external transport. QEMU's USB emulation and redirection \cite{qemuusb} also provide
+USB to a guest, but physical \code{usb-host} devices are normally refused for
+migration, and redirection reconnects the client transport rather than
+preserving a host-side session.
 
 \begin{table}[t]
 \centering
@@ -201,10 +218,11 @@ preserve a host-side session across a migration on their own.
 \toprule
 Approach & Where device state lives & Consequence for migration \\
 \midrule
-Kernel USB driver in guest (\code{usbfs} in host process) & host process, not serialisable & session must survive; used here \\
-USB/IP \cite{hirofuchi2005usbip} & source host, exported over network & source must stay online; transport in path \\
-QEMU USB redirection \cite{qemuusb} & emulated device in VMM & re-created on destination \\
-virtio-usb \cite{virtio12} & paravirtual, guest driver & guest-visible change; driver required \\
+Host \code{usbfs} process with an emulated xHCI in the guest \cite{usbvfiodrepo} & host process, not serialisable & session must survive; used here \\
+USB/IP \cite{hirofuchi2005usbip,kernelusbip} & source host, exported over a network & device stays on the source host; transport in the data path \\
+QEMU \code{usb-host} (physical passthrough) \cite{qemuusb} & device bound inside the VMM process & migration is normally refused by the VMM \\
+USB redirection (\code{usbredir}) \cite{qemuusb} & transport reconnects to the client & client-side reconnection semantics differ \\
+Kernel VFIO migration (non-USB) \cite{kernelvfio} & device-defined migration state & requires device support; not applicable to USB \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -241,12 +259,21 @@ memory.}
 %=====================================================================
 
 \subsection{Experimental setup}
-All measurements were taken on a single host running Debian~13 with Linux
-6.17.4, 8 cores and 62\,GiB of RAM, on which the KVM module is loaded
-\cite{kivity2007kvm}. Table~\ref{tab:setup} lists the software under test. The
-guest is Ubuntu 22.04.4 (kernel 5.15.0-94-generic) booted directly with CH. The
-physical device is a 32\,GB USB~2.0 stick formatted with exfat, attached at
-\code{/dev/bus/usb/001/007}.
+\label{sec:setup}
+All measurements were taken on one bare-metal host running Debian~13 with
+Linux 6.17.4 (Proxmox kernel), 8 cores and 62\,GiB of RAM, which runs KVM. The
+host was \emph{not} idle: four unrelated KVM virtual machines (16, 8, 2 and
+1\,GiB of RAM) were running throughout, and no CPU pinning was used. We report
+this because it is an uncontrolled load confounder and, as
+Section~\ref{sec:results} notes, the most likely explanation for the spread in
+the measured downtime. Table~\ref{tab:setup} lists the software under test. The
+guest has 2\,GiB of RAM and one vCPU, runs Ubuntu 22.04.4 (kernel
+5.15.0-94-generic) and is booted directly by CH. The physical device is a 32\,GB
+USB~2.0 High-Speed stick (Innostor \code{1f75:0903}, exfat data partition)
+attached at \code{/dev/bus/usb/001/007}. The server binary under test was an
+unoptimised \code{cargo} debug build, run with verbose logging
+(\code{-v}) and USB packet capture enabled; Section~\ref{sec:threats}
+discusses the resulting measurement overhead.
 
 \begin{table}[t]
 \centering
@@ -321,9 +348,12 @@ generic PCI state (configuration space, INTx/MSI/MSI-X configuration and the
 MSI-X table); device BAR state, opaque device state and DMA dirty tracking are
 absent. There is no device-state region in the protocol implementation and no
 parameter with which the destination could be pointed at a different vfio-user
-server. This is why our design deliberately does \emph{not} try to move device
-state: for a same-host migration the server process simply stays alive and keeps
-the session, and only the \emph{client} that the server talks to changes.
+server. A protocol-level migration mechanism is being proposed for
+vfio-user \cite{komatsu2026vfiousermig}, but the implementation used here
+carries no device state. This is why our design deliberately does
+\emph{not} try to move device state: for a same-host migration the server
+process simply stays alive and keeps the session, and only the \emph{client}
+that the server talks to changes.
 
 %=====================================================================
 \section{Design}
@@ -382,7 +412,10 @@ dead and aborts the running I/O.
 
 The wrapper therefore tracks which connection most recently registered
 interrupts and lets only that connection issue the destructive counterparts.
-Teardown from any other connection is logged and ignored. This is deliberately
+Teardown from any other connection is logged and ignored. In every run we
+observed the interrupt-disable half of this guard fire (the server logs the
+ignore); we did not observe a \code{DmaUnmap} reach the server on this path, so
+that half is implemented but not exercised by our workload. This is deliberately
 coarse: it is correct for the hand-over case, which is the case that needs it,
 and it cannot be triggered accidentally by the active client.
 
@@ -442,8 +475,9 @@ crate is consumed by the VMM, the fix is applied to the VMM's dependency graph
 rather than to \code{usbvfiod}, which only uses the server side.
 
 \subsection{Cloud Hypervisor integration}
-No CH code was modified. The only integration artefact is a
-\code{[patch.crates-io]} entry that points CH at the fixed crate. Because the
+No CH source file was modified, but the result does require a \emph{custom CH
+build}: the integration artefact is a \code{[patch.crates-io]} entry that
+points CH at the fixed crate, and reproduction therefore needs that build. Because the
 crate lives in a monorepo whose manifest also references a sibling
 \code{vfio-bindings} crate that has diverged from the published version, the
 patch deliberately uses a variant of the fix branch in which that crate resolves
@@ -492,16 +526,43 @@ contains the migration instant; the md5 of the copied file equals the md5 of
 the source file on the stick; the guest shows no enumeration after boot; and no
 reset or I/O error appears. The md5 comparison is made inside the guest
 against the stick itself, so it also verifies that the device remained readable
-after the migration. We ran the experiment 10 times after the fixes described in
-Section~\ref{sec:design} were in place.
+after the migration. The migration was requested with CH's
+\code{downtime\_ms=300} as the per-iteration stop-and-copy goal; the separate
+project acceptance target, used for the verdict, was $\le 2000$\,ms. We ran the
+experiment 10 times after the fixes described in Section~\ref{sec:design} were
+in place. All ten runs were executed consecutively on the same host with the
+same stick and the same 128\,MiB file, whose content was generated once and
+never regenerated between runs.
 
 \subsection{Results}
+\label{sec:results}
 All 10 runs pass. Table~\ref{tab:results} lists the per-run figures;
 Fig.~\ref{fig:downtime} shows the downtime distribution. Downtime is measured
 by CH (\code{downtime\_ms}), not by the harness. Copy duration is the time the
 guest takes to copy the file, which is chosen to be long enough that the
-migration necessarily falls inside the copy window; the variation is dominated
-by USB~2.0 read throughput and by page-cache effects, not by the migration.
+migration necessarily falls inside the copy window.
+
+\emph{How much does 10 out of 10 establish?} Not as much as the number
+suggests, and we prefer to say so. Ten consecutive successes give a
+Clopper--Pearson 95\,\% confidence interval for the pass probability of
+$[0.74, 1.0]$, i.e.\ the data are consistent with a residual failure rate of up
+to roughly 26\,\%. Against the pre-fix behaviour we observed---one failure in
+five runs---the comparison is not statistically significant (Fisher exact,
+$p \approx 0.33$). The honest reading is that the fixes removed a failure we
+could reproduce before them, and that the experiment bounds the residual
+failure rate only weakly. Section~\ref{sec:threats} discusses what would be
+needed to do better; a deterministic injection test at the hand-over is the
+appropriate instrument, not more repetitions of a naturally occurring race.
+
+The downtime figures are also less precise than their range suggests: the
+median is 15.5\,ms but the order-statistic 95\,\% confidence interval for it
+spans essentially the whole observed range (4--18\,ms). The distribution is
+bimodal and time-blocked---the three consecutive runs 7--9 gave 4, 4 and 6\,ms
+while every other run gave 15--18\,ms---which points to a time-varying
+environmental factor (the four co-resident VMs of Section~\ref{sec:setup})
+rather than to independent noise. Copy duration varied by a factor of four
+(13.2--52.4\,s); we did not run a no-migration control, so we do not attribute
+that variation to a specific cause.
 
 \begin{table}[t]
 \centering
@@ -525,8 +586,7 @@ Run & Downtime (ms) & Copy (s) & Spans & md5 / enums \\
 9  &  6 & 15.0 & yes & match / 0 \\
 10 & 17 & 52.4 & yes & match / 0 \\
 \midrule
-\multicolumn{2}{@{}l}{median downtime} & \multicolumn{2}{l}{15.5\,ms} & \\
-\multicolumn{2}{@{}l}{target} & \multicolumn{2}{l}{$\le 2000$\,ms} & \\
+\multicolumn{2}{@{}l}{min / median / max} & \multicolumn{2}{l}{4 / 15.5 / 18\,ms} & \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -540,8 +600,8 @@ $\le 2000$\,ms is far above the plotted range.}
 \end{figure}
 
 \subsection{Timeline of a representative run}
-Fig.~\ref{fig:copy} shows the guest's copy progress for one run together with
-the migration instant. The copy is visibly interrupted in the sense that the
+Fig.~\ref{fig:copy} shows the guest's copy progress for a demonstration run
+(not one of the ten acceptance runs) together with the migration instant. The copy is visibly interrupted in the sense that the
 curve is not perfectly smooth, but it continues across the migration and
 finishes with $rc=0$; the guest never restarts the transfer. The final
 throughput in this run was $5.7$\,MB/s ($5.4$\,MiB/s), consistent with the stick's USB~2.0
@@ -550,14 +610,16 @@ read performance measured outside the migration.
 \begin{figure}[t]
 \centering
 \input{figures/copy_progress.tex}
-\caption{Guest copy progress in the representative run (128\,MiB). The
-migration occurs at $t=7.39$\,s, inside the copy window; the copy completes at
-$t=23.54$\,s with status 0.}
+\caption{Guest copy progress in a demonstration run (128\,MiB), not one of the
+ten acceptance runs of Table~\ref{tab:results}. The migration occurs at
+$t=7.39$\,s, inside the copy window; the copy completes at $t=23.54$\,s with
+status 0.}
 \label{fig:copy}
 \end{figure}
 
 \subsection{Data-path continuity under the hand-over}
-Fig.~\ref{fig:rate} compares the USB transaction rate across the hand-over
+\label{sec:rate}
+Fig.~\ref{fig:rate} compares the USB packet rate across the hand-over
 before and after the interrupt fix, both taken from the vfio-user server's
 packet capture. Before the fix the rate drops to zero at the hand-over and
 stays there: the device is still powered and the server still holds it, but no
@@ -570,9 +632,11 @@ a transport or device problem.
 \begin{figure}[t]
 \centering
 \input{figures/rate.tex}
-\caption{USB transaction rate across the hand-over, measured at the vfio-user
-server. Without the interrupt fix, transfers stop at the hand-over and never
-resume; with the fix they continue until the copy completes.}
+\caption{USB packets per second across the hand-over, counted by usbmon at the
+vfio-user server. Both traces are single runs, so this is an illustration of the
+mechanism rather than a controlled A/B comparison. Without the interrupt fix the
+transfers stop at the hand-over and do not resume within the observed 39\,s
+window; with the fix they continue until the copy completes.}
 \label{fig:rate}
 \end{figure}
 
@@ -608,6 +672,38 @@ passed four consecutive runs before it failed on the fifth, and only repeated
 runs after the fix justify the claim of 10 out of 10.
 
 %=====================================================================
+\subsection{Threats to validity}
+\label{sec:threats}
+\emph{Construct.} The integrity check is an MD5 of a read-only bulk copy that
+was read once, sequentially. It detects corrupted or lost data, but it cannot
+detect \emph{duplicated} reads: a replayed read changes nothing in the
+destination file. Our claim is therefore \emph{no data corruption and no lost
+I/O}, and we do not claim to have tested duplication. The enumeration and
+reset criteria are now derived from the guest's own kernel log and are counted
+relative to the guest's uptime at the migration instant
+(Section~\ref{sec:implementation}), which removes an earlier threshold artefact
+in our harness, but they still rely on the kernel printing a message.
+
+\emph{Internal.} The host was loaded by four other VMs and no per-run load was
+recorded; run order was not randomised and the low-downtime runs happened to be
+consecutive. The server was a debug build with verbose logging and packet
+capture enabled. The migration instant used for the ``spans'' test is the
+instant the migration was \emph{requested} on the host, converted through the
+heartbeat pairs rather than through a verified clock offset. The destination of
+the copy was a file on the host-backed guest disk, so host page-cache writeback
+is in the loop.
+
+\emph{External.} One device class (bulk storage), one USB~2.0 Bulk-Only
+Transport device on one controller, one guest kernel, one workload size, and
+same-host \code{memfds} migration only. A USB~3.0/UAS device with several
+in-flight commands would exercise the hand-over differently, and the slow
+$\sim$2--6\,MiB/s transfer rate of the stick used here makes a completion less
+likely to land inside the hand-over window than it would be on faster hardware.
+
+\emph{Statistical.} $n=10$, no confidence intervals in the headline numbers,
+and a pre-fix rate estimated from $n=5$; the statistical power is discussed in
+Section~\ref{sec:results}.
+
 \section{Discussion and Limitations}
 \label{sec:discussion}
 %=====================================================================
@@ -643,6 +739,28 @@ traffic in particular cannot be made lossless by retrying and is not supported
 by the underlying \code{nusb} library. Cross-host migration is a different
 problem: it needs the device state to be transferred or an equivalent device to
 be provided on the destination, and it cannot preserve a host-side session.
+
+\paragraph{Failure and rollback.}
+Ownership of the device is decided by whichever connection most recently
+registered interrupts, and it is not committed to a migration transaction. If a
+migration is cancelled after the destination has installed its line, the source
+is left running with a line that will not be serviced, and nothing re-registers
+it. Our own Phase-0 measurements showed that CH's
+\code{timeout\_strategy=cancel} did not in fact bring the source back to a
+usable state. A production design needs an explicit epoch that is committed at
+migration commit time, plus a revoke and re-register path, and it needs to be
+tested with a destination crash and a source-side cancel while I/O is in
+flight. We did not implement or test that.
+
+\paragraph{Socket trust and bounds.}
+The vfio-user socket grants whoever can connect it full DMA authority over the
+guest's memory, so it is as sensitive as the guest's own memory. Our accept
+loop bounds how many connections are \emph{served} (\code{-{}-max-clients}), but
+a client beyond that limit waits in the listen backlog, there is no per-client
+timeout, and a client that registers interrupts becomes the owner and may then
+unmap DMA regions. A deployment must therefore treat the socket as trusted and
+protect it with filesystem permissions or a private namespace; the design does
+not defend against a hostile local client.
 
 \paragraph{Process lifecycle.}
 With more than one client the server no longer exits when the last client
@@ -682,8 +800,10 @@ ownership rules we introduced would need to become per-device.
 \section{Reproduction}
 %=====================================================================
 
-The full harness, the development log and the raw measurement data are part of
-the accompanying artefact. In outline:
+The full harness, the development log and the raw measurement data are in the
+project repository at \url{https://github.com/yeungtuzi/usbvfiod} (the guest
+harness under \code{guest/}, the paper and its figures under \code{paper/}, and
+the development log under \code{docs/DEVLOG\_cn.md}). In outline:
 
 \begin{enumerate}
   \item build the guest image: \code{guest/build-guest.sh};
@@ -695,105 +815,7 @@ the accompanying artefact. In outline:
         described in Section~\ref{sec:implementation}.
 \end{enumerate}
 
-\begin{thebibliography}{99}
-\footnotesize
-
-\bibitem{clark2005live}
-C.~Clark, K.~Fraser, S.~Hand, J.~G. Hansen, E.~Jul, C.~Limpach, I.~Pratt, and
-A.~Warfield, ``Live migration of virtual machines,'' in \emph{Proc. 2nd USENIX
-Symp. Networked Systems Design and Implementation (NSDI)}, 2005.
-[Online]. Available: \url{https://www.usenix.org/conference/nsdi-05/live-migration-virtual-machines}
-
-\bibitem{kivity2007kvm}
-A.~Kivity, Y.~Kamay, D.~Laor, U.~Lublin, and A.~Liguori, ``kvm: the Linux
-virtual machine monitor,'' in \emph{Proc. Linux Symposium}, vol.~1, 2007,
-pp.~225--230. [Online]. Available:
-\url{https://www.kernel.org/doc/ols/2007/ols2007v1-pages-225-230.pdf}
-
-\bibitem{agache2020firecracker}
-A.~Agache, M.~Brooker, A.~Iordache, A.~Liguori, R.~Neugebauer, P.~Piwonka, and
-D.-M. Popa, ``Firecracker: lightweight virtualization for serverless
-applications,'' in \emph{Proc. 17th USENIX Symp. Networked Systems Design and
-Implementation (NSDI)}, 2020. [Online]. Available:
-\url{https://www.usenix.org/conference/nsdi20/presentation/agache}
-
-\bibitem{hirofuchi2005usbip}
-T.~Hirofuchi, E.~Kawai, K.~Fujikawa, and H.~Sunahara, ``USB/IP: a transparent
-device sharing technology over IP network,'' \emph{IPSJ Digital Courier},
-vol.~1, 2005, doi: 10.2197/ipsjdc.1.394. [Online]. Available:
-\url{https://www.jstage.jst.go.jp/article/ipsjdc/1/0/1_0_394/_article}
-
-\bibitem{qemuvfiouser}
-QEMU, ``vfio-user protocol specification.'' [Online]. Available:
-\url{https://www.qemu.org/docs/master/interop/vfio-user.html}
-
-\bibitem{chvfiouser}
-Cloud Hypervisor, ``VFIO-user HOWTO (docs/vfio-user.md).'' [Online]. Available:
-\url{https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/vfio-user.md}
-
-\bibitem{chlive}
-Cloud Hypervisor, ``Live migration (docs/live\_migration.md).'' [Online].
-Available:
-\url{https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/live_migration.md}
-
-\bibitem{chrepo}
-Cloud Hypervisor, ``A virtual machine monitor for modern cloud workloads.''
-[Online]. Available: \url{https://github.com/cloud-hypervisor/cloud-hypervisor}
-
-\bibitem{kernelvfio}
-The Linux Kernel documentation, ``VFIO --- virtual function I/O.'' [Online].
-Available: \url{https://docs.kernel.org/driver-api/vfio.html}
-
-\bibitem{kernelusbip}
-The Linux Kernel documentation, ``USB/IP protocol.'' [Online]. Available:
-\url{https://docs.kernel.org/usb/usbip_protocol.html}
-
-\bibitem{kernelusb}
-The Linux Kernel documentation, ``USB support.'' [Online]. Available:
-\url{https://docs.kernel.org/usb/index.html}
-
-\bibitem{qemuusb}
-QEMU, ``USB emulation.'' [Online]. Available:
-\url{https://www.qemu.org/docs/master/system/devices/usb.html}
-
-\bibitem{virtio12}
-OASIS, ``Virtual I/O device (VIRTIO) version 1.2,'' 2022. [Online]. Available:
-\url{https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html}
-
-\bibitem{xhcispec}
-Intel Corporation, ``eXtensible host controller interface for universal serial
-bus (xHCI) specification, revision 1.2.'' [Online]. Available:
-\url{https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf}
-
-\bibitem{usbbot}
-USB Implementers Forum, ``Universal serial bus mass storage class bulk-only
-transport, revision 1.0,'' 1999. [Online]. Available:
-\url{https://www.usb.org/sites/default/files/usbmassbulk_10.pdf}
-
-\bibitem{rustvmmvfio}
-rust-vmm, ``rust-vmm/vfio.'' [Online]. Available:
-\url{https://github.com/rust-vmm/vfio}
-
-\bibitem{vfiousercrate}
-``vfio\_user 0.1.5 --- Rust crate documentation.'' [Online]. Available:
-\url{https://docs.rs/vfio_user/0.1.5}
-
-\bibitem{nusb}
-K.~Mehall, ``nusb: a new pure-Rust library for cross-platform low-level USB.''
-[Online]. Available: \url{https://github.com/kevinmehall/nusb}
-
-\bibitem{usbvfiodrepo}
-Cyberus Technology, ``usbvfiod: a vfio-user server for USB pass-through.''
-[Online]. Available: \url{https://github.com/cyberus-technology/usbvfiod}
-
-\bibitem{libvfiouser}
-Nutanix, ``libvfio-user: framework for emulating devices in userspace.''
-[Online]. Available: \url{https://github.com/nutanix/libvfio-user}
-
-\bibitem{memfd}
-Linux man-pages, ``memfd\_create(2).'' [Online]. Available:
-\url{https://man7.org/linux/man-pages/man2/memfd_create.2.html}
-
-\end{thebibliography}
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
 
 \end{document}

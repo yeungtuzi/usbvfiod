@@ -379,11 +379,17 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             "set IRQs: {index} flags: {flags:#x} start: {start:#x} count: {count:#x} #fds: {}",
             fds.len()
         );
-        assert_eq!(
-            index, VFIO_PCI_MSIX_IRQ_INDEX,
-            "Only MSI-X interrupts are supported"
-        );
-        assert!(count <= 1, "Only a single interrupt is supported");
+        // Return errors rather than panicking: the request comes from a client
+        // connection, and a malformed request must not take the thread (or the
+        // controller) down.
+        if index != VFIO_PCI_MSIX_IRQ_INDEX {
+            return Err(std::io::Error::other("only MSI-X interrupts are supported"));
+        }
+        if count > 1 {
+            return Err(std::io::Error::other(
+                "only a single interrupt is supported",
+            ));
+        }
 
         let irqs: Vec<Arc<InterruptEventFd>> = fds
             .into_iter()
@@ -401,16 +407,11 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             _ => Arc::new(DummyInterruptLine::default()),
         };
 
+        // Note: the interrupter itself raises one interrupt when it installs a
+        // new line. Only the interrupter's own worker can order that kick
+        // against the event messages that were queued before the hand-over, so
+        // the kick must not be issued from this thread.
         self.controller.connect_irq(Arc::clone(&irq));
-
-        // A live migration hands the device over to a new client. Any transfer
-        // that completed while the *previous* client's interrupt line was still
-        // installed has its completion event in the guest's event ring, but the
-        // interrupt itself was delivered to a line the departing VMM will never
-        // service. Raise one interrupt now so the guest re-examines the event
-        // ring and picks those completions up; a spurious MSI-X interrupt is
-        // harmless because the guest simply finds nothing new to process.
-        irq.interrupt();
 
         Ok(())
     }

@@ -15,9 +15,8 @@
   \addplot[very thick, blue!70!black] table[x index=0, y index=1]
     {data/copy_progress.dat};
   \addlegendentry{guest \texttt{dd} progress}
-  \addplot[red, dashed, very thick, domain=0:26] {0};
+  \addplot[red, dashed, very thick] coordinates {(7.393,0) (7.393,140)};
   \addlegendentry{migration at $t=7.39$\,s}
-  \draw[red, dashed, very thick] (axis cs:7.393,0) -- (axis cs:7.393,140);
   \addplot[only marks, mark=*, mark size=1.8pt, red] coordinates {(7.393,19)};
 \end{axis}
 \end{tikzpicture}

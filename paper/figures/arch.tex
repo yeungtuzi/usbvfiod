@@ -1,24 +1,34 @@
 % Figure: system architecture.
-% Chain: physical USB stick -> usbvfiod -> vfio-user -> Cloud Hypervisor -> guest.
+% Chain: physical USB stick -> usbvfiod -> vfio-user -> Cloud Hypervisor (source
+% and destination VMM instances) -> guest.
 \begin{tikzpicture}[
   font=\scriptsize,
   >=Latex,
   node distance=11mm,
   blk/.style={draw, rounded corners=2pt, align=center, inner sep=4pt,
-              minimum height=12mm, minimum width=24mm},
+              minimum height=12mm},
+  vmm/.style={draw, rounded corners=1pt, align=center, inner sep=2pt,
+              minimum height=6mm, minimum width=27mm, font=\tiny, fill=white},
   ar/.style={->, thick},
 ]
-  \node[blk, fill=blue!8] (dev) {USB stick\\[1pt]\tiny exfat, 32\,GB};
+  \node[blk, fill=blue!8, minimum width=24mm] (dev) {USB stick\\[1pt]\tiny exfat, 32\,GB};
   \node[blk, fill=orange!14, right=of dev, minimum width=30mm] (uvf)
         {usbvfiod\\[1pt]\tiny virtual xHCI controller\\\tiny endpoint workers\\\tiny interrupter};
-  \node[blk, fill=green!10, right=of uvf, minimum width=28mm] (ch)
-        {Cloud Hypervisor\\[1pt]\tiny source VMM\\\tiny destination VMM};
-  \node[blk, fill=violet!10, right=of ch, minimum width=28mm] (g)
+
+  % Cloud Hypervisor holds the two VMM instances involved in the migration.
+  \node[draw, rounded corners=2pt, fill=green!8, inner sep=4pt,
+        right=of uvf, minimum width=32mm, minimum height=19mm] (chbox) {};
+  \node[font=\tiny\bfseries, anchor=south] at ([yshift=0.5mm]chbox.north)
+        {Cloud Hypervisor};
+  \node[vmm] (src) at ([yshift=3.4mm]chbox.center) {source VMM};
+  \node[vmm] (dst) at ([yshift=-3.4mm]chbox.center) {destination VMM};
+
+  \node[blk, fill=violet!10, right=of chbox, minimum width=28mm] (g)
         {Guest OS\\[1pt]\tiny xHCI driver\\\tiny usb-storage};
 
-  \draw[ar] (dev) -- node[above, font=\tiny, align=center]{usbfs\\(usb-storage)} (uvf);
-  \draw[ar] (uvf) -- node[above, font=\tiny]{vfio-user} node[below, font=\tiny]{AF\_UNIX} (ch);
-  \draw[ar] (ch) -- node[above, font=\tiny, align=center]{emulated\\PCI} (g);
+  \draw[ar] (dev) -- node[above, font=\tiny, align=center]{usbfs\\(nusb)} (uvf);
+  \draw[ar] (uvf) -- node[above, font=\tiny]{vfio-user} node[below, font=\tiny]{AF\_UNIX} (chbox);
+  \draw[ar] (chbox) -- node[above, font=\tiny, align=center]{emulated\\PCI} (g);
 
   % annotations
   \draw[decorate, decoration={brace, amplitude=3pt, mirror}, thick, red!70]
@@ -26,7 +36,7 @@
         node[midway, below=4pt, font=\scriptsize, align=center, red!70]
         {device session held for the whole migration};
   \draw[decorate, decoration={brace, amplitude=3pt}, thick, teal!70]
-        ([yshift=1mm]ch.north west) -- ([yshift=1mm]g.north east)
-        node[midway, above=4pt, font=\scriptsize, align=center, teal!70]
+        ([yshift=1mm]chbox.north west) -- ([yshift=1mm]chbox.north east)
+        node[midway, above=3pt, font=\scriptsize, align=center, teal!70]
         {both VMMs map the same guest memory};
 \end{tikzpicture}
