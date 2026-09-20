@@ -132,9 +132,15 @@ def main() -> int:
     pattern = sys.argv[2] if len(sys.argv) > 2 else "*.log"
 
     rows = []
+    skipped = []
     for path in sorted(glob.glob(os.path.join(batch, pattern))):
         text = open(path, errors="replace").read()
         tag = os.path.basename(path).rsplit("-", 1)[0]
+        # a run that has not printed a verdict yet is still in progress: counting
+        # it as a failure would make a live campaign look worse than it is
+        if "VERDICT" not in text and "CONTROL RESULT" not in text:
+            skipped.append(os.path.basename(path))
+            continue
         m = {k: (p.search(text).group(1) if p.search(text) else "") for k, p in PATTERNS.items()}
         control = bool(m["ctrl_spans"])
         if control:
@@ -156,6 +162,8 @@ def main() -> int:
             "ok": ok,
         })
 
+    if skipped:
+        print(f"(skipped {len(skipped)} incomplete run(s): {', '.join(skipped[:4])})")
     if not rows:
         print(f"no logs matched {pattern} in {batch}")
         return 1

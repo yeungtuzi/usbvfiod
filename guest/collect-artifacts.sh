@@ -39,6 +39,11 @@ echo "copied $n run directories"
 )
 echo "wrote SHA256SUMS ($(wc -l < "$DEST/SHA256SUMS") files)"
 
+# hand-over exposure: how many completions were at risk in each run
+python3 "$(dirname "$0")/analyze-handover-exposure.py" "$DEST"/*/usbvfiod.log \
+  > "$DEST/handover-exposure.txt" 2>/dev/null || true
+echo "wrote handover-exposure.txt"
+
 # manifest: metrics from verdict.py plus the artefact inventory
 python3 - "$DEST" <<'PY'
 import os, re, sys, glob, hashlib

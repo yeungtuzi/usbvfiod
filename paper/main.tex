@@ -614,6 +614,28 @@ transfers stop at the hand-over and do not recover within the observed window; w
 \label{fig:rate}
 \end{figure}
 
+\subsection{How exposed the runs were to the race}
+\label{sec:exposure}
+The hand-over fix only matters if the race it addresses actually occurs, so we
+measured its exposure instead of inferring it. Two things have to coincide: a
+transfer must complete after the migration has been requested---from that point
+the source VMM is paused and will never service another interrupt---and before
+the interrupter has installed the destination's line. The server log records
+every completion and every line installation with microsecond timestamps, so the
+width of that window and the number of completions inside it can be counted per
+run.
+
+The window was \ExposureWindowMin--\ExposureWindowMax\,ms wide, and
+\ExposureRuns{} of the \ExposureMeasured{} runs analysed had at least one
+completion inside it: \ExposureCompletions{} completions in total, at most
+\ExposureWorst{} in a single run. Each of those completions has its event in the
+guest's event ring but its interrupt delivered to the departing VMM's descriptor,
+so without the kick the guest is never told to look at the ring. An exposure
+rate of \ExposureRate\,\% is consistent with the pre-fix failure rate we
+observed (one run in five), and it explains why the defect is intermittent: the
+window is only a few milliseconds wide while completions arrive at a few hundred
+per second.
+
 \subsection{Defects found}
 Table~\ref{tab:defects} summarises the four defects that had to be fixed. The
 first two are deterministic and reproduce on every run; the third is

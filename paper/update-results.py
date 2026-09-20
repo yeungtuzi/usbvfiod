@@ -77,6 +77,7 @@ def main() -> int:
     ap.add_argument("--out", default="paper/data/results.tex")
     ap.add_argument("--ab", help="optional CSV from the kick on/off A/B")
     ap.add_argument("--control", help="optional CSV from the control batch")
+    ap.add_argument("--exposure", help="optional handover-exposure.txt")
     args = ap.parse_args()
 
     rows = list(csv.DictReader(open(args.csv)))
@@ -117,6 +118,27 @@ def main() -> int:
         f"\\newcommand{{\\StaleMax}}{{{st and max(st) or '?'}}}",
         "",
     ]
+
+    # hand-over exposure, if the analysis file is available
+    if args.exposure and os.path.exists(args.exposure):
+        txt = open(args.exposure).read()
+        rows_exp = [l.split() for l in txt.splitlines()
+                    if l.strip() and not l.startswith(("run", "runs ", "total", "worst"))]
+        expos = [(int(r[1]), float(r[3])) for r in rows_exp if len(r) >= 4 and r[1].isdigit()]
+        if expos:
+            windows = [w for _, w in expos]
+            n_exp = sum(1 for e, _ in expos if e > 0)
+            tot = sum(e for e, _ in expos)
+            lines += [
+                f"\\newcommand{{\\ExposureWindowMin}}{{{min(windows):.1f}}}",
+                f"\\newcommand{{\\ExposureWindowMax}}{{{max(windows):.1f}}}",
+                f"\\newcommand{{\\ExposureRuns}}{{{n_exp}}}",
+                f"\\newcommand{{\\ExposureMeasured}}{{{len(expos)}}}",
+                f"\\newcommand{{\\ExposureCompletions}}{{{tot}}}",
+                f"\\newcommand{{\\ExposureWorst}}{{{max(e for e, _ in expos)}}}",
+                f"\\newcommand{{\\ExposureRate}}{{{100.0 * n_exp / len(expos):.0f}}}",
+                "",
+            ]
 
     # table body: run index, downtime, copy duration, spans, integrity
     body = ["% table body: one row per run", "\\midrule"]
