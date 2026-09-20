@@ -13,7 +13,7 @@ mod xhci_backend;
 
 use std::{
     os::fd::{FromRawFd, OwnedFd},
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -24,7 +24,7 @@ use clap::Parser;
 use cli::Cli;
 use device::{pcap::UsbPcapManager, xhci::real_device::CompleteRealDevice};
 use hotplug_server::run_hotplug_server;
-use shared_backend::SharedBackend;
+use shared_backend::SharedBackendState;
 use tracing::{debug, error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 use vfio_user::Server;
@@ -117,7 +117,7 @@ fn run_multi_client<CRD: CompleteRealDevice>(
     backend: XhciBackend<CRD>,
     max_clients: usize,
 ) -> Result<()> {
-    let shared = Arc::new(Mutex::new(backend));
+    let shared = Arc::new(SharedBackendState::new(backend));
     let mut handles = Vec::with_capacity(max_clients);
 
     for index in 0..max_clients {
@@ -127,7 +127,7 @@ fn run_multi_client<CRD: CompleteRealDevice>(
             .name(format!("vfio-user-client-{index}"))
             .spawn(move || {
                 loop {
-                    let mut shared_backend = SharedBackend::new(Arc::clone(&shared));
+                    let mut shared_backend = shared.connect();
                     if let Err(err) = server.run(&mut shared_backend) {
                         error!("vfio-user connection ended with error: {err}");
                         // Do not spin on a persistently failing listener.
