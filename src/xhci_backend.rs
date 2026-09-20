@@ -217,25 +217,22 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
         offset: u64,
         data: &mut [u8],
     ) -> Result<(), std::io::Error> {
+        // Sizes come from a client request, so they are validated rather than
+        // assumed: a malformed request must not panic a connection thread.
+        let size = RequestSize::try_from(data.len() as u64)
+            .map_err(|_| std::io::Error::other("unsupported region read size"))?;
+
         let value: u64 = match region {
-            VFIO_PCI_CONFIG_REGION_INDEX => self.controller.read_cfg(Request::new(
-                offset,
-                RequestSize::try_from(data.len() as u64).expect("should use valid request size"),
-            )),
-
-            0 => self.controller.read_io(
-                0,
-                Request::new(
-                    offset,
-                    RequestSize::try_from(data.len() as u64)
-                        .expect("should use valid request size"),
-                ),
-            ),
-
+            VFIO_PCI_CONFIG_REGION_INDEX => self.controller.read_cfg(Request::new(offset, size)),
+            0 => self.controller.read_io(0, Request::new(offset, size)),
             _ => !0u64,
         };
 
-        data.copy_from_slice(&value.to_le_bytes()[0..data.len()]);
+        let bytes = value.to_le_bytes();
+        if data.len() > bytes.len() {
+            return Err(std::io::Error::other("unsupported region read size"));
+        }
+        data.copy_from_slice(&bytes[0..data.len()]);
 
         trace!(
             "read region {region} offset {offset:#x}+{} val {:?}",
@@ -258,54 +255,32 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             data
         );
 
+        let size = RequestSize::try_from(data.len() as u64)
+            .map_err(|_| std::io::Error::other("unsupported region write size"))?;
+
+        let value: u64 = match data.len() {
+            1 => data[0].into(),
+            2 => {
+                // SAFETY: this branch is only taken if data.len() == 2
+                let val: [u8; 2] = data.try_into().unwrap();
+                u16::from_le_bytes(val).into()
+            }
+            4 => {
+                // SAFETY: this branch is only taken if data.len() == 4
+                let val: [u8; 4] = data.try_into().unwrap();
+                u32::from_le_bytes(val).into()
+            }
+            _ => return Err(std::io::Error::other("unsupported region write size")),
+        };
+
         match region {
-            VFIO_PCI_CONFIG_REGION_INDEX => self.controller.write_cfg(
-                Request::new(
-                    offset,
-                    RequestSize::try_from(data.len() as u64)
-                        .expect("should use valid request size"),
-                ),
-                match data.len() {
-                    1 => data[0].into(),
-                    2 => {
-                        // SAFETY:: this branch is only taken if data.len() == 2
-                        let val: [u8; 2] = data.try_into().unwrap();
-                        u16::from_le_bytes(val).into()
-                    }
-
-                    4 => {
-                        // SAFETY:: this branch is only taken if data.len() == 4
-                        let val: [u8; 4] = data.try_into().unwrap();
-                        u32::from_le_bytes(val).into()
-                    }
-                    _ => todo!(),
-                },
-            ),
-
-            0 => self.controller.write_io(
-                0,
-                Request::new(
-                    offset,
-                    RequestSize::try_from(data.len() as u64)
-                        .expect("should use valid request size"),
-                ),
-                match data.len() {
-                    1 => data[0].into(),
-                    2 => {
-                        // SAFETY:: this branch is only taken if data.len() == 2
-                        let val: [u8; 2] = data.try_into().unwrap();
-                        u16::from_le_bytes(val).into()
-                    }
-
-                    4 => {
-                        // SAFETY:: this branch is only taken if data.len() == 4
-                        let val: [u8; 4] = data.try_into().unwrap();
-                        u32::from_le_bytes(val).into()
-                    }
-                    _ => todo!(),
-                },
-            ),
-            _ => todo!(),
+            VFIO_PCI_CONFIG_REGION_INDEX => {
+                self.controller.write_cfg(Request::new(offset, size), value);
+            }
+            0 => self
+                .controller
+                .write_io(0, Request::new(offset, size), value),
+            _ => return Err(std::io::Error::other("unsupported region write")),
         }
 
         Ok(())
@@ -322,13 +297,10 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
         info!("dma_map flags = {flags:?} offset = {offset} address = {address} size = {size} fd = {fd:?}");
 
         if let Some(fd) = fd {
-            let mseg = MemorySegment::new_from_fd(
-                &fd,
-                offset,
-                size,
-                // We want to know when this happens, so bail out eagerly here.
-                flags.try_into().expect("Failed to convert flags"),
-            )?;
+            let flags = flags
+                .try_into()
+                .map_err(|_| std::io::Error::other("unsupported DMA map flags"))?;
+            let mseg = MemorySegment::new_from_fd(&fd, offset, size, flags)?;
 
             // A reconnecting client (e.g. the destination VMM taking over the
             // device after a live migration) re-maps the very same guest memory

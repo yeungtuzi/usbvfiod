@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{runtime, select};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::device::bus::BusDeviceRef;
 use crate::device::interrupt_line::{DummyInterruptLine, InterruptLine};
@@ -219,10 +219,22 @@ impl EventWorker {
                     // happen here, in the worker, after the earlier SendEvent
                     // messages have been processed; doing it from the caller
                     // thread would not order it against them.
-                    self.interrupt_line.interrupt();
-                    // Counted by the harness as evidence that the hand-over
-                    // path was exercised in a given run.
-                    info!("interrupt line installed: re-raising one interrupt to cover the hand-over window");
+                    // Test hook (debug builds only): suppress the kick so that
+                    // the hand-over defect can be reproduced on demand as a
+                    // negative control in an A/B experiment.
+                    #[cfg(debug_assertions)]
+                    let suppressed = std::env::var_os("USBVFIOD_DISABLE_IRQ_KICK").is_some();
+                    #[cfg(not(debug_assertions))]
+                    let suppressed = false;
+
+                    if suppressed {
+                        warn!("interrupt kick suppressed by USBVFIOD_DISABLE_IRQ_KICK (test hook)");
+                    } else {
+                        self.interrupt_line.interrupt();
+                        // Counted by the harness as evidence that the hand-over
+                        // path was exercised in a given run.
+                        info!("interrupt line installed: re-raising one interrupt to cover the hand-over window");
+                    }
                 }
                 InterrupterMessage::Reset(completion) => {
                     self.reset();

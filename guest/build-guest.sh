@@ -158,7 +158,9 @@ say "DEMO-COPY: SOURCE_READY $(date +%s.%N)"
 ls -l /mnt/usb/testfile.bin >> "$LOG" 2>&1 || { say "DEMO-COPY: ERROR no testfile"; exit 1; }
 say "DEMO-COPY: COPY_START $(date +%s.%N)"
 dd if=/mnt/usb/testfile.bin of=/root/testfile.copy bs=1M status=progress 2>> "$LOG"
-say "DEMO-COPY: COPY_DONE $(date +%s.%N) rc=$?"
+# capture the status first: $(date ...) would otherwise reset $?
+dd_rc=$?
+say "DEMO-COPY: COPY_DONE $(date +%s.%N) rc=$dd_rc"
 sync
 md5sum /mnt/usb/testfile.bin /root/testfile.copy >> "$LOG" 2>&1
 # Kernel view, so that the enumeration/reset verdict can be derived from the

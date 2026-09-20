@@ -179,9 +179,12 @@ echo
 # console can lose output exactly around the migration, because the destination
 # re-creates the serial device and resets the guest TTY.
 chmod +x "$DIR/verdict.py"
+DOWNTIME_MS=$(grep -aoE 'downtime of [0-9]+ms' "$RUN/src.log" | grep -aoE '[0-9]+' | head -1)
 "$DIR/verdict.py" --guest-log "$GLOG" \
   --expected-md5 "$(awk '{print $1}' "$DIR/testfile.md5")" \
-  --migration-epoch "$MIGRATION_EPOCH"
+  --migration-epoch "$MIGRATION_EPOCH" \
+  --downtime-ms "${DOWNTIME_MS:-0}" \
+  --max-downtime-ms "${MAX_DOWNTIME_MS:-2000}"
 RC=$?
 echo "============================================"
 echo "artifacts: $RUN/{console.log,guest-demo.log,src.log,dst.log,usbvfiod.log,usb.pcap}"

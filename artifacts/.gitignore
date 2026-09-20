@@ -1,0 +1,6 @@
+# Raw run artefacts (logs and USB packet captures) are kept on disk and handed
+# over as attachments. A single 128 MiB copy produces ~130 MB of pcap, so the
+# data is deliberately not committed; only this description is tracked.
+*
+!.gitignore
+!README.md

@@ -45,6 +45,11 @@ const NO_OWNER: u64 = u64::MAX;
 #[derive(Debug)]
 pub struct SharedBackendState<CRD: CompleteRealDevice> {
     backend: Mutex<XhciBackend<CRD>>,
+    /// Serialises the control-path operations that both decide and mutate
+    /// ownership. Holding a single lock across the ownership check, the backend
+    /// mutation and the owner update closes the window in which a departing
+    /// client could disable the line that the incoming client just installed.
+    control: Mutex<()>,
     /// Id of the connection that most recently registered interrupts.
     irq_owner: AtomicU64,
     /// Hands out a unique id per connection.
@@ -55,6 +60,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
     pub const fn new(backend: XhciBackend<CRD>) -> Self {
         Self {
             backend: Mutex::new(backend),
+            control: Mutex::new(()),
             irq_owner: AtomicU64::new(NO_OWNER),
             next_id: AtomicU64::new(0),
         }
@@ -86,7 +92,16 @@ impl<CRD: CompleteRealDevice> SharedBackend<CRD> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Serialises ownership decisions against the backend mutation they guard.
+    fn control(&self) -> MutexGuard<'_, ()> {
+        self.state
+            .control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// True if this connection is allowed to issue destructive teardown.
+    /// Callers must hold the control lock.
     fn owns_device(&self) -> bool {
         self.state.irq_owner.load(Ordering::SeqCst) == self.id
     }
@@ -130,7 +145,9 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
     ) -> Result<(), std::io::Error> {
         // A departing VMM unmaps the regions it created. If another connection
         // has taken the device over in the meantime, that unmap must not tear
-        // down the new owner's mappings.
+        // down the new owner's mappings. The check and the mutation share the
+        // control lock so that a hand-over cannot interleave between them.
+        let _control = self.control();
         if !self.owns_device() {
             warn!(
                 "ignoring DMA unmap at {address:#x} from stale vfio-user client {}",
@@ -156,6 +173,12 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         // An empty fd list means "disable interrupts". Only the connection that
         // currently owns the interrupt line may do that; otherwise the source
         // VMM of a finished migration would disable the destination's line.
+        //
+        // The whole sequence - ownership check, backend mutation and owner
+        // update - is one critical section. Without that, a departing client
+        // could pass the check before the incoming client recorded ownership
+        // and then install its dummy line on top of the new one.
+        let _control = self.control();
         if fds.is_empty() && !self.owns_device() {
             warn!(
                 "ignoring IRQ disable from stale vfio-user client {}",

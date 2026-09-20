@@ -291,3 +291,45 @@ MD5 VERDICT          : MATCH
 3. `--max-clients > 1` 下进程不再随最后一个客户端退出；systemd 场景需显式管理生命周期。
 
 
+
+---
+
+## D10. 评审驱动的迭代（轮次 1，2026-09-20）
+
+**背景**：论文初稿（`paper/main.pdf`）完成后，用本机模型组建了三位审稿人（系统 / 方法学 / 写作）进行预评审。结论：**系统方向 Reject（顶会标准）、方法学 Major Revision、写作 Major Revision**。完整意见与逐条处理见 `docs/review_report_cn.md`。
+
+**评审发现的两个真缺陷（这是本次迭代最大收获）**
+
+1. **我修复中断竞态的方法本身有竞态**（系统审稿人发现）。
+   我把"补发踢中断"放在 `set_irqs` 的**调用线程**上，而事件是由 interrupter 的 worker 线程从 mpsc 队列里顺序取出的。若某个 `SendEvent` 排在 `UpdateInterruptLine` 之前，它仍会被写到**旧的中断线**上；而调用线程的踢中断可能已经在 worker 处理到换线之前就打出去了 —— Guest 扫描事件环时什么也没看到，事件随即丢失。**这正是我以为已经修好的那个缺陷的残余形态。**
+   **修复**：把踢中断移入 worker 的 `UpdateInterruptLine` 分支，在**换线之后**执行。只有 worker 自己才能把这次踢中断与排在前面的事件排出先后顺序。
+
+2. **我的验收判据"迁移后无重枚举"根本无法触发**（方法学审稿人发现）。
+   harness 统计的是 `uptime > 30s` 的枚举行，而迁移发生在 Guest uptime **≈14.6s**；且 harness 在 `MD5_DONE` 出现后立刻杀掉 VM，因此 `>30s` 的窗口实际只有约 1 秒。也就是说**该判据永远是 0**，"无重枚举"结论当时并没有被真正测量。
+   **修复**：新增 `guest/verdict.py` —— 用 Guest 心跳行（同时带 epoch 与 `/proc/uptime`）插值出**迁移时刻的 Guest uptime**，只统计该时刻之后的枚举/复位/IO 错误；并让 Guest 在复制结束后把 `dmesg`+`lsusb` 追加进自己的日志，全部判据取自 **Guest 自己的日志**（而非被本文自己证明会丢行的串口）。
+
+**其他已修**：`set_irqs` 的 `assert!` 改为返回错误（畸形客户端不再能打崩连接线程）；新增相关工作定位（已核实的 QEMU `[PATCH v2 0/8] vfio-user: live migration support`（Hugo Komatsu, 2026-09）与 Watanabe et al., SAINT 2010）；实验环境如实披露（宿主同时跑 4 台 KVM VM、无 CPU 绑定、调试构建 + `-v` + pcap、Guest 2 GiB/1 vCPU）；新增 `Threats to validity` 小节与统计区间（10/10 → Clopper–Pearson [0.74,1.0]，残余失败率上界 ≈26%，与修复前比较 Fisher p≈0.33）；标题/摘要去 overclaim；引用改用 BibTeX+IEEEtran（自动按引用顺序、补访问日期）；修正表 I 中引用 VIRTIO 1.2 的 "virtio-usb" 错误行；重绘图 1/图 2。
+
+**新增验证基础设施（均为可复现脚本）**
+| 脚本 | 作用 |
+|---|---|
+| `guest/verdict.py` | 从 Guest 日志计算判定（含迁移时刻 uptime 插值） |
+| `guest/acceptance-batch.sh` | N 次运行 → CSV + 置信区间 |
+| `guest/summarize-batch.py` | 独立后处理汇总（Clopper–Pearson） |
+| `guest/irq-kick-ab.sh` | **受控 A/B**：同一二进制内通过 debug-only 钩子 `USBVFIOD_DISABLE_IRQ_KICK` 关闭踢中断，作为负对照 |
+| `guest/replug-baseline.sh` | "朴素方案"基线：不迁移、直接热拔插，测量 Guest 侧代价 |
+| `guest/collect-artifacts.sh` | 把每次运行的全部原始文件（含 pcap）留档 + 校验和 + manifest |
+| `guest/sample-host-load.sh` | 批次期间采样宿主负载，用于归因运行间差异 |
+
+**工件留档策略（用户要求：跑够次数、全部原始日志留档）**
+- 每次运行的全部原始文件（Guest 日志、串口捕获、两端 CH 日志、usbvfiod 全量 trace 日志、USB pcap、迁移记录）**逐字节保留**，不筛选、不裁剪。
+- 落盘到 `artifacts/`（`/run` 是 tmpfs，重启即失），附 `SHA256SUMS` 与 `MANIFEST.md`（逐轮指标 + 文件清单 + 复算方法）。
+- 单次运行的 pcap ≈130 MB（完整 128 MiB USB 流量），故 `artifacts/` 的数据不入 git，仅以附件形式交付；`artifacts/README.md` 与 `.gitignore` 入库。
+
+**教训（写入流程）**
+1. **判据必须由被观测对象自己的时钟与日志产生**。用宿主时钟 + 固定阈值去判断 Guest 内部状态，两处都出过错（串口丢行、阈值不可能触发）。
+2. **修复时序缺陷时，"在哪里执行"和"做什么"同样重要**：同样的踢中断，放在调用线程是错的，放在 worker 内才是对的。
+3. **单次通过不能验收时序缺陷**；必须有可开关的负对照（`irq-kick-ab.sh`）与更大的样本量。
+4. **跑够次数 + 全部原始日志留档**，否则"10/10"既无法被检验，也无法被复算。
+
+---

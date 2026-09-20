@@ -92,6 +92,38 @@ def clopper_pearson(k: int, n: int) -> tuple[float, float]:
     return low, high
 
 
+def bootstrap_median_ci(values: list[float], iters: int = 10000) -> tuple[float, float]:
+    """95% percentile bootstrap interval for the median (deterministic seed)."""
+    import random
+    if not values:
+        return (float("nan"), float("nan"))
+    rng = random.Random(20260920)
+    n = len(values)
+    meds = []
+    for _ in range(iters):
+        sample = [values[rng.randrange(n)] for _ in range(n)]
+        sample.sort()
+        meds.append(sample[n // 2] if n % 2 else 0.5 * (sample[n // 2 - 1] + sample[n // 2]))
+    meds.sort()
+    return meds[int(0.025 * iters)], meds[int(0.975 * iters) - 1]
+
+
+def fisher_exact(a: int, b: int, c: int, d: int) -> float:
+    """Two-sided Fisher exact p for the 2x2 table [[a,b],[c,d]]."""
+    from math import comb
+    n = a + b + c + d
+    r1, c1 = a + b, a + c
+    def prob(x: int) -> float:
+        return comb(r1, x) * comb(n - r1, c1 - x) / comb(n, c1)
+    obs = prob(a)
+    total = 0.0
+    for x in range(max(0, c1 - (n - r1)), min(r1, c1) + 1):
+        px = prob(x)
+        if px <= obs + 1e-12:
+            total += px
+    return min(1.0, total)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -147,7 +179,9 @@ def main() -> int:
         if k == n:
             print(f"  upper bound on failure rate (rule of three): <= {3/n:.3f}")
         if dt:
-            print(f"  downtime ms          : min {min(dt):.0f} / median {statistics.median(dt):.1f} / max {max(dt):.0f}")
+            lo_dt, hi_dt = bootstrap_median_ci(dt)
+            print(f"  downtime ms          : min {min(dt):.0f} / median {statistics.median(dt):.1f} / max {max(dt):.0f}"
+                  f"   (bootstrap 95% median CI [{lo_dt:.0f}, {hi_dt:.0f}])")
         if cp:
             print(f"  copy s               : min {min(cp):.1f} / median {statistics.median(cp):.1f} / max {max(cp):.1f}")
         kicks = [int(r["kicks"]) for r in sub if r["kicks"]]
@@ -156,6 +190,14 @@ def main() -> int:
             print(f"  interrupt lines installed per run: min {min(kicks)} / max {max(kicks)}")
         if stale:
             print(f"  stale teardowns ignored per run  : min {min(stale)} / max {max(stale)}")
+
+    arms = [t for t in sorted({r["tag"] for r in rows}) if not all(r["control"] for r in rows if r["tag"] == t)]
+    if len(arms) == 2:
+        a = [r for r in rows if r["tag"] == arms[0]]
+        b = [r for r in rows if r["tag"] == arms[1]]
+        ka, kb = sum(r["ok"] for r in a), sum(r["ok"] for r in b)
+        p = fisher_exact(ka, len(a) - ka, kb, len(b) - kb)
+        print(f"\nFisher exact ({arms[0]} vs {arms[1]}): {ka}/{len(a)} vs {kb}/{len(b)}, two-sided p = {p:.4f}")
 
     print(f"\nsummary csv: {out}")
     return 0
