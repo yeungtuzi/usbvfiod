@@ -11,7 +11,7 @@
 
 **演示目标**：主机上一个 USB 存储设备（U 盘/移动硬盘）直通给 Guest；Guest 正在复制文件；此时对 Guest 做 CH live migration；迁移后 Guest 继续复制，**设备无断开、无 reset、无重枚举，复制不中断或最多一次可重试错误**。
 
-**范围**：**同主机** CH live migration（对应 R14）。跨主机（R15）不在本 demo 范围。
+**范围（已确认）**：**同主机** CH live migration（对应 R14）。跨主机的需求场景尚未明确，因此**本期不实现**，仅在 §11 给出技术方案展望（对应 R15）。
 
 **假设**（若不成立需先确认）：
 1. Guest 为 Linux（xHCI + usb-storage，systemd）。
@@ -132,9 +132,9 @@ diff guest-lsusb-v-before.txt guest-lsusb-v-after.txt   # 空
 | C. 协议级 migration / device-state region | usbvfiod 暴露 state region；CH 实现 `VfioUserClientWrapper` 的 migration_flags/state/dirty-log；状态导入导出 | 三方大改（主计划 Phase 1+3） | 低（周期长） | **是** |
 
 **推荐**：
-- **Demo v0 走方案 A**：最快拿到"透明迁移"的可演示结果，验证 demo 的 5 步叙事与验收指标。
+| **Demo v0 走方案 A**：最快拿到"透明迁移"的可演示结果，验证 demo 的 5 步叙事与验收指标。
 - **方案 B 作为 A 的降级**（若 fd 交接在 CH/接口上受阻）。
-- **方案 C 是产品路径**（主计划 Phase 3 原定内容），demo 之后按原计划推进，用于跨主机与 usbvfiod 可重启（R11）。
+- **方案 C 是产品路径**（主计划 Phase 3 原定内容），且是跨主机的唯一可行方向；**本期不实现**，仅在 §11 展望。
 
 > 注意：方案 A 是**同主机专用捷径**，不实现 R2/R3 的状态格式，也不满足 R11（usbvfiod 重启）。它对 demo 足够，对产品不够——两者不要混为一谈。
 
@@ -245,7 +245,7 @@ sequenceDiagram
 | 主计划条目 | 现状 | 建议修订 |
 |---|---|---|
 | §6.3 关键未知"CH 对 vfio-user migration 的支持边界" | **已由实验 B 关闭** | 改为事实陈述：不支持且死锁；同主机走 fd 交接，跨主机走 state region |
-| R7 | "实现并集成 vfio-user migration 模型到 CH" | 拆成 **R7a 同主机 fd 交接**（demo）与 **R7b 协议级 state region**（产品/跨主机） |
+| R7 | "实现并集成 vfio-user migration 模型到 CH" | 拆成 **R7a 同主机 fd 交接**（本期 demo）与 **R7b 协议级 state region**（跨主机，需求明确后再启动，本期仅展望） |
 | R14 | 无具体验收 | 引用本 demo §2 的指标表 |
 | R16 | 假设 `cancel` 后源端继续运行 | **实验 B 反例**：需先做 D0.3 验证并修复源端恢复 |
 | §9 Phase 3 | 直接做 migration region | 前置 **Phase 3a 同主机 fd 交接 demo**，再进 3b |
@@ -289,3 +289,34 @@ sequenceDiagram
 | 3. HV 准备迁移，Guest 接到通知，硬盘暂停、速度变为 0 | Step 3；v0 = vCPU 暂停导致 I/O 停顿（D7 增强为显式 quiesce 通知） |
 | 4. 迁移 Guest OS | Step 4；方案 A 的 fd 交接 + memfds 共享内存 |
 | 5. 新 Guest 继续复制，仅掉速或一次重传，过程透明 | Step 5；§2 验收指标保证"无 reset/重枚举"，允许 ≤1 次 SCSI 重试 |
+
+---
+
+## 11. 跨主机技术方案展望（仅展望，本期不实现）
+
+> 触发条件：跨主机迁移的需求场景明确后再启动。本节只做技术可达性与限制判定，**不产生本期实现任务**。
+
+### 11.1 问题本质
+
+物理 USB 设备与 **host kernel 会话**（endpoint toggle、设备内部状态、SCSI sense、interface claim）**不可序列化**，也无法跨主机复制。因此跨主机的关键不是"搬运设备"，而是**目标主机能否获得等效资源**。这决定了跨主机在当前架构下**无法做到 zero-perception**。
+
+### 11.2 候选路线
+
+| 路线 | 思路 | 前置依赖 | 主要限制 |
+|---|---|---|---|
+| **C1. 协议级 device-state region** | usbvfiod 暴露 device-state/migration region 导出 `ControllerState`；CH 实现 `VfioUserClientWrapper` 的 migration_flags/state/dirty-log；目标端 usbvfiod 导入状态并绑定**本地等效设备** | R7b + R2/R3 状态格式 + `usbdev-agent` | host-session 状态搬不过去，需设备级重建 + 上层幂等重试；适用于**存储类**（Guest 侧重挂载可恢复逻辑状态） |
+| **C2. USB/IP** | 设备留源主机，`usbip` 导出，目标主机 `vhci-hcd` 接入；usbvfiod 后端改为访问 vhci | 源主机在线、网络带宽/延迟、`vhci-hcd` | 与 xHCI 模型叠加复杂；链路中断即设备丢失；不适合大文件持续吞吐 |
+| **C3. virtio-usb（未来）** | 复用 USB/IP + `vhci-hcd` 思路，把 TCP 换为 VirtIO 传输 | 上游实现（当前多为 stub） | 生态未成熟 |
+| **C4. 兜底：热拔 + 热插** | 迁移前 detach、迁移后 attach | 无 | Guest 必然看到 disconnect/re-enumerate，**违反 R4**，仅作降级演示 |
+
+### 11.3 判定要点
+
+1. **设备类别差异大**：存储类可通过 Guest 侧重挂载恢复逻辑状态；HID / 实时 / 有状态设备更差。
+2. **在途 I/O 无法跨主机续传**：必须依赖上层协议幂等 + 重试，存在重复写风险。
+3. **停机窗口显著更长**：设备重建 + 枚举 + 重挂载，远大于同主机 demo 的毫秒级 blackout。
+4. **zero-perception 不可达**：除非目标端使用"同一物理设备 + 同一 host 会话"，而这正是同主机场景。
+
+### 11.4 结论
+
+- **同主机**：方案 A（fd 交接）可做到接近零感知，是本 demo 的目标。
+- **跨主机**：当前架构下只能做到"**可恢复但不透明**"；若要提升透明度，必须先落地 C1 的状态模型（R7b）并接受设备级重建。需求明确前不投入实现。
