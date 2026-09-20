@@ -401,7 +401,16 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             _ => Arc::new(DummyInterruptLine::default()),
         };
 
-        self.controller.connect_irq(irq);
+        self.controller.connect_irq(Arc::clone(&irq));
+
+        // A live migration hands the device over to a new client. Any transfer
+        // that completed while the *previous* client's interrupt line was still
+        // installed has its completion event in the guest's event ring, but the
+        // interrupt itself was delivered to a line the departing VMM will never
+        // service. Raise one interrupt now so the guest re-examines the event
+        // ring and picks those completions up; a spurious MSI-X interrupt is
+        // harmless because the guest simply finds nothing new to process.
+        irq.interrupt();
 
         Ok(())
     }
