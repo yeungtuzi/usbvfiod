@@ -379,6 +379,28 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             _ => Arc::new(DummyInterruptLine::default()),
         };
 
+        // Test hook (debug builds only): widen the hand-over window
+        // deterministically. The new line is handed to the interrupter worker
+        // only after this call returns, so while we sleep here the worker keeps
+        // draining completion events onto the *departing* client's interrupt
+        // line - exactly the window the kick exists to cover. Without the hook
+        // that window is a few milliseconds of luck; with it every injection run
+        // is exposed by construction, which turns "the kick covers the window"
+        // from an anecdote into a controlled comparison.
+        #[cfg(debug_assertions)]
+        if !irqs.is_empty() {
+            if let Some(ms) = std::env::var("USBVFIOD_INJECT_HANDOVER_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                warn!(
+                    "TEST HOOK: delaying hand-over line install by {ms} ms \
+                     (USBVFIOD_INJECT_HANDOVER_DELAY_MS)"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
+
         // Note: the interrupter itself raises one interrupt when it installs a
         // new line. Only the interrupter's own worker can order that kick
         // against the event messages that were queued before the hand-over, so

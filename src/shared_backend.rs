@@ -103,6 +103,15 @@ impl<CRD: CompleteRealDevice> SharedBackend<CRD> {
     /// True if this connection is allowed to issue destructive teardown.
     /// Callers must hold the control lock.
     fn owns_device(&self) -> bool {
+        // Test hook (debug builds only): pretend that every connection owns the
+        // device. This deliberately reintroduces the stale-teardown defect so an
+        // injection run can show that the ownership guard is load-bearing
+        // instead of merely plausible. It must never be enabled in a build that
+        // is used to measure the fixed system.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("USBVFIOD_DISABLE_OWNER_GUARD").is_some() {
+            return true;
+        }
         self.state.irq_owner.load(Ordering::SeqCst) == self.id
     }
 }
