@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Recompute a batch's verdicts from the archived run directories.
 
+Note: this normalises the md5 column to MATCH/MISMATCH, so re-deriving a CSV that
+acceptance-batch.sh wrote can differ in that one string (it emits
+"MISMATCH/missing" when the guest log has no digest). Verdicts and all numeric
+fields are identical.
+
 The verdict logic in guest/verdict.py changed after the round-3 campaign: the
 copy must now contain CH's own completion instant (parsed from src.log) rather
 than the instant send-migration returned, and a missing downtime line is a

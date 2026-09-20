@@ -20,6 +20,7 @@
 # including its packet capture is ~145 MB, so two campaigns do not fit).
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$DIR/.." && pwd)"
 RUNROOT="${RUNROOT:-/root/usb-runs}"
 export PATH=/root/lvllm/.cargo/bin:$PATH CARGO_HOME=/root/lvllm/.cargo RUSTUP_HOME=/root/lvllm/.rustup
 
@@ -47,7 +48,7 @@ if [ "$do_bcd" = 1 ]; then
   TAG=control RUNROOT="$RUNROOT" "$DIR/acceptance-batch.sh" 8 control
 
   echo; echo "########## PHASE C: 8 release-build migration runs ##########"
-  TAG=release USBVF=<repo>/target/release/usbvfiod RUNROOT="$RUNROOT" \
+  TAG=release USBVF="$REPO/target/release/usbvfiod" RUNROOT="$RUNROOT" \
     "$DIR/acceptance-batch.sh" 8 migrate
 
   echo; echo "########## PHASE D: 8 kick-disabled runs (negative control) ##########"
@@ -68,7 +69,7 @@ fi
 
 if [ "$do_f" = 1 ]; then
   echo; echo "########## PHASE F: fault-injection suite ##########"
-  RUNROOT=/root/usb-inject USBVF=<repo>/target/debug/usbvfiod \
+  RUNROOT=/root/usb-inject USBVF="$REPO/target/debug/usbvfiod" \
     "$DIR/injection-suite.sh" 5
 fi
 

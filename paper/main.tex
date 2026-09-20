@@ -455,8 +455,8 @@ Our fix is to re-raise one interrupt immediately after a new line is installed.
 A spurious MSI-X interrupt is harmless: the guest inspects the event ring,
 finds the pending completion (or nothing) and continues. This converts a lost
 interrupt into at most one redundant ring scan, and the 5\,s-window experiment
-shows that one such interrupt is sufficient even when the window is three orders
-of magnitude wider than the natural one.
+shows that one such interrupt is sufficient even when the window is two to
+three orders of magnitude wider than the natural one.
 
 \subsection{DMA mapping idempotence}
 \label{sec:dma}
@@ -832,7 +832,8 @@ Anchoring the pause on CH's own clock gives the lower bound (\ExposureRuns{} of
 \ExposureWindowMin--\ExposureWindowMax\,ms); anchoring it through the harness
 epoch gives \ExposureEpochRuns{} runs and \ExposureEpochCompletions{}
 completions (window \ExposureEpochWindowMin--\ExposureEpochWindowMax\,ms); and
-anchoring it at the migration request gives the strict upper bound of
+and using the harness epoch itself as the start of the window---it is recorded
+before \code{ch-remote} is even launched---gives the strict upper bound of
 \ExposureUpperRuns{} runs and \ExposureUpperCompletions{} completions
 (\ExposureUpperRate\,\%, window up to \ExposureUpperWindowMax\,ms). All three are
 in the same range: the race occurs naturally in a minority-to-half of the
@@ -877,7 +878,7 @@ interrupter worker keeps draining completion events onto the departing client's
 line---the window the kick exists to cover---and the transfer queue empties, so
 that the completion which lands in the window is the last one outstanding. The
 \emph{number} of completions at risk does not grow with the delay: it saturates
-at the queue depth (0--4 naturally, 1--3 at 500\,ms, 1--4 at 5\,s), because once
+at the queue depth (a few per run, whatever the delay), because once
 the queue is empty there is nothing left to complete. What the delay changes is
 whether a \emph{further} completion follows the lost one. Sleeping in the worker
 instead would push events behind the line-swap message and \emph{shrink} the
@@ -1177,11 +1178,11 @@ repository location is omitted here for double-blind review. In outline:
   \item reproduce the acceptance, control, release and kick-off arms with
         \code{guest/campaign-b.sh a} and \code{guest/campaign-b.sh bcd}; the naive
         detach/re-attach baseline with \code{guest/phase-e-and-winlong.sh};
-  \item reproduce the fault-injection arms with \code{guest/injection-suite.sh}
-        and, for the extended sizes reported here,
-        \code{guest/extend-injection.sh} (which appends the runs that took the
-        500\,ms arm to ten and the 5\,s arms to eight, using the \code{APPEND}
-        mode of the batch driver);
+  \item reproduce the fault-injection arms with \code{guest/injection-suite.sh},
+        which already uses the sizes reported here (500\,ms kick-off ten runs,
+        5\,s pair eight each); \code{guest/extend-injection.sh} records how those
+        sizes were reached from the original five via the \code{APPEND} mode of
+        the batch driver and is not meant to be run after the suite;
   \item re-judge any archived batch from its logs alone with
         \code{guest/reverify-batch.py} (the verdicts in this paper were
         recomputed this way after the criterion change, without re-running a

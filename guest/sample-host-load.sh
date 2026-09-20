@@ -5,7 +5,7 @@
 #
 #   ./sample-host-load.sh <output-file> [interval-seconds]
 set -u
-OUT="${1:-<repo>/artifacts/host-load.log}"
+OUT="${1:-$(cd "$(dirname "$0")/.." && pwd)/artifacts/host-load.log}"
 INT="${2:-5}"
 mkdir -p "$(dirname "$OUT")"
 echo "# epoch load1 load5 load15 running/total vms_running usbvfiod_procs ch_procs" > "$OUT"

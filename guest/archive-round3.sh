@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copy every round-3 raw log into artifacts/ with checksums and a manifest.
 set -uo pipefail
-DIR=<repo>/guest
-A=<repo>/artifacts
+DIR="$(cd "$(dirname "$0")" && pwd)"
+A="${A:-$(cd "$DIR/.." && pwd)/artifacts}"
 "$DIR/collect-artifacts.sh" /root/usb-runs       campaign-B-acceptance
 "$DIR/collect-artifacts.sh" /root/usb-inject     injection-round3
 "$DIR/collect-artifacts.sh" /root/usb-replug     replug-baseline

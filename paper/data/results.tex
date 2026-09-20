@@ -52,7 +52,8 @@
 % ---- hand-over exposure. lower = anchored on CH's own clock
 % (its Enabling/Disabling IRQ events tied to usbvfiod's wall clock);
 % epoch = anchored on the harness's migration.epoch; upper = anchored
-% on the migration request. truth is between lower and epoch.
+% at the raw harness epoch (recorded before ch-remote is launched). truth is
+% between lower and epoch.
 \newcommand{\ExposureWindowMin}{2.1}
 \newcommand{\ExposureWindowMax}{13.4}
 \newcommand{\ExposureRuns}{4}

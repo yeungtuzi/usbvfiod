@@ -109,6 +109,11 @@ def main() -> int:
 
     # The request instant is not the instant the VM stops running: CH does a
     # pre-copy, so the guest keeps executing for a few milliseconds afterwards.
+    # The deltas below are anchored on the harness migration epoch, which is
+    # recorded a few ms before ch-remote is launched, so the derived instants are
+    # a few ms early. That only widens the copy margin (>=9.5 s in the acceptance
+    # arm), so it cannot flip a verdict; the exposure analysis, where a few ms
+    # matters, ties CH's clock to wall clock instead.
     # When the VMM log is available, derive the pause and completion instants
     # from its own event stream, anchored at the VmSendMigration API request
     # (whose uptime corresponds to the migration epoch recorded by the harness).

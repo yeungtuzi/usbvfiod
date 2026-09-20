@@ -92,9 +92,9 @@ arm guard-off     "USBVFIOD_DISABLE_OWNER_GUARD=1"                            FA
 # window drains the transfer queue, so the lost completion *is* the last one.
 # MAX_DOWNTIME_MS has to be raised because the injected delay is what the VMM
 # reports as downtime; the acceptance budget does not apply to these arms.
-# 8 runs per arm is the pre-registered size: with a perfect split that is the
-# first n at which Fisher's exact two-sided p is below 0.05 (n=4 is already
-# significant at 0.029, but 8 also gives power against an imperfect effect).
+# 8 runs per arm is the pre-registered size. A perfect split is already
+# significant at n=4 (two-sided p=0.029); 8 was chosen to keep power against a
+# less extreme effect (it gives 0.88 at 5% vs 80%).
 arm winlong-on    "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000" PASS 8
 arm winlong-off   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL 8
 

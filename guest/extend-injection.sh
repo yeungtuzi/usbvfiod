@@ -3,8 +3,8 @@
 # The earlier runs stay; reverify-batch.py has already re-judged them with the
 # corrected verdict, so the whole arm uses one verdict definition.
 set -uo pipefail
-DIR=<repo>/guest
-export USBVF=<repo>/target/debug/usbvfiod
+DIR="$(cd "$(dirname "$0")" && pwd)"
+export USBVF="${USBVF:-$(cd "$DIR/.." && pwd)/target/debug/usbvfiod}"
 run_arm() { # tag, env, n
   "$DIR/stop-demo.sh" >/dev/null 2>&1
   echo "########## APPEND $1 (+$3 runs) ##########"

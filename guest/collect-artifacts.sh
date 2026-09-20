@@ -12,7 +12,7 @@ set -uo pipefail
 
 SRC="${1:?usage: collect-artifacts.sh <source-dir> <archive-name>}"
 NAME="${2:?usage: collect-artifacts.sh <source-dir> <archive-name>}"
-DEST="${DEST:-<repo>/artifacts}/$NAME"
+DEST="${DEST:-$(cd "$(dirname "$0")/.." && pwd)/artifacts}/$NAME"
 
 mkdir -p "$DEST"
 echo "collecting $SRC -> $DEST"
