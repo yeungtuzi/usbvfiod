@@ -1,0 +1,24 @@
+% Figure: USB transfer rate across the hand-over (real pcap measurements).
+% Columns: seconds since copy start, packets per second.
+\begin{tikzpicture}
+\begin{axis}[
+  width=\columnwidth, height=5.0cm,
+  xlabel={time since copy start (s)},
+  ylabel={USB packets/s},
+  xmin=-6, xmax=32, ymin=0, ymax=2250,
+  grid=major, grid style={gray!22},
+  tick label style={font=\scriptsize},
+  label style={font=\scriptsize},
+  legend style={font=\tiny, at={(0.02,0.98)}, anchor=north west, draw=gray!40,
+                fill=white, fill opacity=0.85, text opacity=1},
+]
+  \addplot[very thick, blue!70!black] table[x index=0, y index=1]
+    {data/rate_success.dat};
+  \addlegendentry{after the fix: transfers continue}
+  \addplot[very thick, red!70!black] table[x index=0, y index=1]
+    {data/rate_failure.dat};
+  \addlegendentry{before the fix: stalls at the hand-over}
+  \draw[black, dashed, thick] (axis cs:7.393,0) -- (axis cs:7.393,2250);
+  \node[font=\tiny, anchor=north east, rotate=90] at (axis cs:7.0,2200) {hand-over};
+\end{axis}
+\end{tikzpicture}

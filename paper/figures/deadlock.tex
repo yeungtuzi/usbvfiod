@@ -1,0 +1,40 @@
+% Figure: measured deadlock of the unmodified stack.
+% The destination VMM connects while the source still holds the single accepted
+% connection, so the destination blocks forever inside the version handshake.
+\begin{tikzpicture}[
+  font=\scriptsize,
+  >=Latex,
+  x=1cm, y=1cm,
+  ent/.style={draw, rounded corners=2pt, align=center, inner sep=3pt,
+              minimum width=24mm, minimum height=7mm},
+  msg/.style={->, thick},
+]
+  \node[ent, fill=green!10] (src) at (0,0) {source VMM};
+  \node[ent, fill=orange!14] (uvf) at (4.6,0) {usbvfiod};
+  \node[ent, fill=green!10] (dst) at (9.2,0) {destination VMM};
+
+  \draw[thick] (src.south) -- ++(0,-7.4);
+  \draw[thick] (uvf.south) -- ++(0,-7.4);
+  \draw[thick] (dst.south) -- ++(0,-7.4);
+
+  \draw[msg] (0,-0.9) -- node[above, font=\tiny]{connect()} (4.6,-0.9);
+  \draw[msg] (4.6,-1.5) -- node[above, font=\tiny]{accept() \#1 $\rightarrow$ serve} (0,-1.5);
+  \draw[msg] (0,-2.1) -- node[above, font=\tiny]{Version / DeviceGetInfo} (4.6,-2.1);
+  \draw[msg] (4.6,-2.7) -- node[above, font=\tiny]{reply} (0,-2.7);
+  \node[font=\tiny, align=center, text=teal!70] at (2.3,-3.25)
+       {both connected; device works};
+
+  \draw[msg] (9.2,-4.0) -- node[above, font=\tiny]{connect() (queued, never accepted)} (4.6,-4.0);
+  \draw[msg] (9.2,-4.6) -- node[above, font=\tiny]{Version} (4.6,-4.6);
+  \node[font=\tiny, align=left, text=red!75, anchor=west] at (4.9,-5.15)
+       {no reader: \texttt{accept()} was called\\exactly once, so the reply never comes};
+
+  \draw[msg] (0,-6.0) -- node[above, font=\tiny]{send-migration} (4.6,-6.0);
+  \node[font=\tiny, align=left, text=red!75, anchor=west] at (0,-6.7)
+       {measured: destination blocks in \texttt{Client::new()} $\rightarrow$ \texttt{negotiate\_version()}\\
+        for \textbf{199.9\,s} with zero progress; \texttt{Recv-Q}=1 on the listening socket};
+
+  % blocked marker at the destination end of the unanswered handshake
+  \node[red!75, font=\tiny, anchor=north east, align=right] at (9.15,-4.72)
+       {blocked here};
+\end{tikzpicture}

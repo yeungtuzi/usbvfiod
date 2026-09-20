@@ -1,0 +1,46 @@
+% Figure: multi-client backend design.
+% Handshake commands never touch the backend, so a per-command lock lets the
+% destination complete its handshake while the source is still connected.
+\begin{tikzpicture}[
+  font=\scriptsize,
+  >=Latex,
+  node distance=8mm,
+  blk/.style={draw, rounded corners=2pt, align=center, inner sep=4pt,
+              minimum height=9mm},
+  ar/.style={->, thick},
+]
+  % clients
+  \node[blk, fill=green!10, minimum width=26mm] (c0) at (0,2.6)
+        {connection \#0\\\tiny (source VMM)};
+  \node[blk, fill=green!10, minimum width=26mm] (c1) at (0,-0.2)
+        {connection \#1\\\tiny (destination VMM)};
+
+  % handles
+  \node[blk, fill=orange!14, minimum width=30mm] (h0) at (4.6,2.6)
+        {\texttt{SharedBackend}\\\tiny id = 0};
+  \node[blk, fill=orange!14, minimum width=30mm] (h1) at (4.6,-0.2)
+        {\texttt{SharedBackend}\\\tiny id = 1};
+
+  % backend
+  \node[blk, fill=blue!10, minimum width=32mm, minimum height=26mm] (be) at (9.4,1.2) {};
+  \node[font=\scriptsize\bfseries] at (9.4,2.1) {\texttt{XhciBackend}};
+  \node[font=\tiny, align=center] at (9.4,1.2)
+        {xHCI state\\slots, endpoints\\event ring\\interrupt line\\DMA mappings};
+
+  \draw[ar] (c0) -- node[above, font=\tiny]{handshake} (h0);
+  \draw[ar] (c1) -- node[above, font=\tiny]{handshake} (h1);
+  \draw[ar] (h0) -- node[above, font=\tiny, align=center]{lock per\\command} (be);
+  \draw[ar] (h1) -- node[below, font=\tiny, align=center]{lock per\\command} (be);
+
+  % invariant box
+  \node[draw, rounded corners=2pt, fill=red!5, align=left, inner sep=4pt,
+        font=\tiny, text width=62mm, anchor=north west] at (-0.2,-2.0)
+  {\textbf{Invariants enforced by the wrapper}\\[2pt]
+   \textbullet\ \emph{stale teardown:} only the connection that most recently
+     registered interrupts may issue \texttt{SetIrqs} without fds or
+     \texttt{DmaUnmap};\\[1pt]
+   \textbullet\ \emph{interrupt hand-over:} registering a new line re-raises one
+     interrupt so the guest re-examines the event ring;\\[1pt]
+   \textbullet\ \emph{DMA idempotence:} re-mapping the same guest range replaces
+     the old mapping instead of failing.};
+\end{tikzpicture}

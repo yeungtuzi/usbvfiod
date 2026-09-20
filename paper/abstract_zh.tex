@@ -1,0 +1,36 @@
+% 中文摘要（与 main.tex 的英文论文配套）
+% 编译：xelatex abstract_zh.tex
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\title{\bfseries 基于多客户端 vfio-user 后端的\\同主机虚拟机热迁移中 USB 存储设备透明直通}
+\author{作者姓名\\ \small 学院，学校\\ \small 邮箱：author@example.edu}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{摘要}
+
+将物理 USB 设备直通给虚拟机在存储、加密狗与仪器等场景中很有价值，但它与热迁移存在根本冲突：主机侧的设备会话（打开的文件描述符、已声明的接口、端点状态以及设备自身的内部状态）无法序列化，因此任何会拆除该会话的迁移路径都会迫使客户机（Guest）重新枚举设备。本文以 Cloud Hypervisor 与 \texttt{usbvfiod}（一个以 Rust 实现、模拟 xHCI 控制器的 vfio-user 服务端）为具体研究对象。
+
+我们首先通过实测指出：迁移一台挂载了 vfio-user 设备的虚拟机时会发生\textbf{死锁}而非明确报错——目标端 VMM 在协议版本握手中阻塞了 199.9 秒，其间无任何日志、无错误输出。根因是 vfio-user 服务端仅调用一次 \texttt{accept()}，而该连接仍被源端持有，目标端的连接虽然在内核层面建立成功（监听队列 \texttt{Recv-Q}=1），却永远不会被服务。我们还通过源码分析说明：即使解决了连接问题，该设备的 \texttt{Pausable}/\texttt{Migratable} 均为空实现、其快照不含 BAR 与设备内部状态，因此设备状态本身也不会被迁移。
+
+在此基础上，本文提出一套\textbf{无需修改 VMM} 的设计。其关键观察是：vfio-user 的握手类命令（\texttt{Version}、\texttt{DeviceGetInfo}、\texttt{DeviceGetRegionInfo}、\texttt{GetIrqInfo}）根本不访问设备后端，只有数据面命令才访问。因此只要把后端锁从“按连接持有”改为“\textbf{按命令加锁}”，第二个客户端即可在第一个仍然连接的情况下完成握手，而设备状态始终留在共享后端中。围绕这一改动，我们还发现并修复了交接过程暴露出的两个进一步缺陷：（1）即将退出的源端会下发破坏性命令，覆盖存活端刚注册的中断线并解除其 DMA 映射；（2）在中断线完成切换之前的窗口内完成的传输，其完成中断被打到即将退出的 VMM 的事件描述符上而永久丢失，表现为复制静默卡死。我们分别以“中断归属者”规则与“注册新中断线后补发一次中断”加以修复。
+
+测量方法学上，我们记录了若干必须修正的观测陷阱：目标端会以 \texttt{File::create()} 截断串口日志、迁移会重建串口设备从而重置 Guest 的 TTY、以及只读且跳过日志回放的挂载会隐藏最近的写入。因此本文的结论一律取自\textbf{Guest 自身的日志}，而非宿主侧观测；并强调时序相关的缺陷必须通过重复实验而非单次通过来验证。
+
+在真实 32\,GB exfat U 盘直通给 Ubuntu 22.04 客户机的实验环境中，一次跨越迁移点的 128\,MiB 文件复制在 \textbf{10/10} 次运行中成功完成：实测停机 \textbf{4--18\,ms}（目标 $\le$2000\,ms），数据校验和与源文件\textbf{逐字节一致}，Guest 侧\textbf{零重枚举、零复位、零 I/O 错误}。本文同时如实报告了尚未消除的限制：迁移会重置 Guest 串口控制台（属于 VMM 串口设备模型行为，与 USB 通路无关）；尚未实现显式的传输静默期（quiesce）；跨主机迁移需要协议级的设备状态区域，当前协议不携带所需状态。
+
+\section*{关键词}
+虚拟化；热迁移；设备直通；vfio-user；USB；xHCI；Cloud Hypervisor；KVM
+
+\vspace{1em}
+\noindent\rule{\textwidth}{0.4pt}
+\vspace{0.5em}
+
+\noindent\textbf{英文摘要见} \texttt{main.pdf}（\texttt{paper/main.tex}，IEEE 会议格式，共 7 页）。
+
+\end{document}
