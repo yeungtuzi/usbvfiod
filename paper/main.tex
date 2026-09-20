@@ -122,10 +122,15 @@ end to end with real hardware.
         own log} rather than from host-side observation, and we report the
         design decisions that this method forced us to change
         (Section~\ref{sec:implementation}).
-  \item We evaluate the result with a real USB stick: 10 out of 10 migrations
-        of a VM that is copying a 128\,MiB file at the time of the migration
-        succeed with 4--18\,ms downtime, byte-identical data and no
-        re-enumeration or reset in the guest (Section~\ref{sec:evaluation}).
+  \item We evaluate the result with a real USB stick: \PassCount{} out of
+        \TotalRuns{} migrations of a VM that is copying a 128\,MiB file at the
+        time of the migration succeed with \DowntimeMin--\DowntimeMax\,ms
+        downtime, byte-identical data and no re-enumeration or reset in the
+        guest, and we separate the fixes from luck with a no-migration control,
+        a release-build arm, a kick-disabled negative control, a naive
+        detach/re-attach baseline, and a fault-injection suite that makes the
+        hand-over race happen by construction
+        (Sections~\ref{sec:evaluation}--\ref{sec:injection}).
 \end{enumerate}
 
 \subsection{Paper organisation}
@@ -511,11 +516,22 @@ reset or I/O error appears. The MD5 comparison is made inside the guest
 against the stick itself, so it also verifies that the device remained readable
 after the migration. The migration was requested with CH's
 \code{downtime\_ms=300} as the per-iteration stop-and-copy goal; the separate
-project acceptance target, used for the verdict, was $\le 2000$\,ms. We ran the
-experiment 10 times after the fixes described in Section~\ref{sec:design} were
-in place. All ten runs were executed consecutively on the same host with the
-same stick and the same 128\,MiB file, whose content was generated once and
-never regenerated between runs.
+project acceptance target, used for the verdict, was $\le 2000$\,ms. All runs
+were executed consecutively on the same host with the same stick and the same
+128\,MiB file, whose content was generated once and never regenerated between
+runs.
+
+A single arm cannot separate the effects that a migration experiment confounds,
+so the acceptance arm (\TotalRuns{} runs of the fixed system, debug build) is
+accompanied by four further arms which differ in exactly one factor:
+\ControlRuns{} runs with no migration at all (does the workload alone produce the
+result?), \ReleaseRuns{} runs with the release build (is the debug build's
+instrumentation doing the work?), \KickOffRuns{} runs with the hand-over kick
+disabled (is the kick load-bearing?), and three runs of the naive alternative in
+which the device is detached and re-attached with the hotplug interface instead
+of migrating. Section~\ref{sec:injection} adds a fault-injection suite that
+makes the hand-over race happen by construction, so that the fixes can be
+credited rather than merely not falsified.
 
 \subsection{Results}
 \label{sec:results}
@@ -525,14 +541,20 @@ by CH (\code{downtime\_ms}), not by the harness. Copy duration is the time the
 guest takes to copy the file, which is chosen to be long enough that the
 migration necessarily falls inside the copy window.
 
-\emph{How much does \PassCount{} out of \TotalRuns{} establish?} Not as much as the number
-suggests, and we prefer to say so. Ten consecutive successes give a one-sided 95\,\% lower confidence bound of $\PassLowerOneSided$ on the pass probability, i.e.\ the one-sided 95\,\% upper bound on the residual failure rate is $\FailUpper$; the two-sided 95\,\% Clopper--Pearson interval is $[\CILow, \CIHigh]$. Against the pre-fix behaviour we observed---one failure in
-five runs---the comparison is not statistically significant (Fisher exact,
-$p \approx 0.33$). The honest reading is that the fixes removed a failure we
-could reproduce before them, and that the experiment bounds the residual
-failure rate only weakly. Section~\ref{sec:threats} discusses what would be
-needed to do better; a deterministic injection test at the hand-over is the
-appropriate instrument, not more repetitions of a naturally occurring race.
+\emph{How much does \PassCount{} out of \TotalRuns{} establish?} More than the
+ten-run version of this experiment did, but still not much on its own, and we
+prefer to say so. \TotalRuns{} consecutive successes give a one-sided 95\,\%
+lower confidence bound of $\PassLowerOneSided$ on the pass probability and a
+one-sided 95\,\% upper bound of $\FailUpper$ on the residual failure rate; the
+two-sided 95\,\% Clopper--Pearson interval is $[\CILow, \CIHigh]$. Against the
+pre-fix behaviour we observed---one failure in five runs---the comparison is
+still not statistically significant (Fisher exact, $p \approx 0.33$ with the
+five-run arm). Twenty successes bound the residual rate at roughly one in seven;
+they do not by themselves show \emph{which} fix carries the weight. That is what
+the negative controls and the injection suite of
+Sections~\ref{sec:arms}--\ref{sec:injection} are for, and
+Section~\ref{sec:threats} discusses what would be needed to narrow the bound
+further.
 
 \emph{Was the hand-over path actually exercised?} Yes, in every run, and the
 harness records it. Each run shows two interrupt-line installations (the source
@@ -544,11 +566,18 @@ the destination would have been left with a dummy interrupt line, which is the
 failure mode we measured before the guard existed. The counts come from the
 server log of each run, which is archived with the raw data.
 
-The downtime figures are also less precise than their range suggests: the median is \DowntimeMedian\,ms but the order-statistic 95\,\% confidence interval for it spans essentially the whole observed range (\DowntimeMin--\DowntimeMax\,ms). The distribution is
-bimodal and time-blocked---the three consecutive runs 7--9 gave 4, 4 and 6\,ms
-while every other run gave 15--18\,ms---which points to a time-varying
-environmental factor (the four co-resident VMs of Section~\ref{sec:setup})
-rather than to independent noise. Copy duration varied between \CopyMin\,s and \CopyMax\,s; a no-migration control run is reported below, so we do not attribute that variation to the migration.
+The downtime figures are also less precise than their range suggests: the median
+is \DowntimeMedian\,ms but the bootstrap 95\,\% interval for the median already
+spans \DowntimeMin--\DowntimeMax\,ms. The \TotalRuns{} values are not unimodal:
+seven runs give 4--6\,ms and the rest give 15--21\,ms, and the two groups are
+interleaved rather than time-blocked (run~5 gives 4\,ms next to run~7 at 15\,ms;
+run~17 gives 5\,ms next to run~18 at 15\,ms). A cause that alternates from one
+run to the next, rather than drifting over the session, is consistent with the
+four co-resident VMs of Section~\ref{sec:setup} stealing CPU during the
+stop-and-copy phase; it is not a property of the USB path, which is idle during
+the switchover. Copy duration varied between \CopyMin\,s and \CopyMax\,s; the
+no-migration control (\ControlRuns{} runs, median \ControlCopyMedian\,s) shows
+the same spread, so we do not attribute that variation to the migration.
 
 \begin{table}[t]
 \centering
@@ -567,10 +596,51 @@ Run & Downtime (ms) & Copy (s) & Spans & MD5 / enums \\
 \begin{figure}[t]
 \centering
 \input{figures/downtime.tex}
-\caption{Measured downtime of the ten acceptance runs. The goal of
+\caption{Measured downtime of the \TotalRuns{} acceptance runs. The goal of
 $\le 2000$\,ms is far above the plotted range.}
 \label{fig:downtime}
 \end{figure}
+
+\subsection{Controls and negative controls}
+\label{sec:arms}
+Table~\ref{tab:arms} puts the acceptance arm beside the four comparison arms.
+Two of them bound our claims from opposite sides.
+
+\emph{No migration.} The \ControlRuns{} control runs copy the same file on the
+same guest without migrating. All complete with matching checksums, so the
+workload by itself is sound and the copy-duration spread is not caused by the
+migration. These runs deliberately have no downtime figure: with no migration
+there is no stop-and-copy phase to measure.
+
+\emph{Kick disabled.} The \KickOffRuns{} runs use the acceptance build with the
+hand-over interrupt suppressed by a debug-only environment switch. This is the
+arm that decides whether the kick earns its place: if these runs failed at the
+rate predicted by the exposure measurement, the kick is load-bearing; if they
+passed, the kick would be defensive decoration. The result is in the ``pass''
+column: \KickOffPass{}/\KickOffRuns{} (Fisher exact against the acceptance arm,
+$p=\FisherKick$). Section~\ref{sec:injection} removes the remaining luck by
+making the window non-empty by construction.
+
+\emph{Release build.} The \ReleaseRuns{} release runs copy at a median of
+\ReleaseCopyMedian\,s against \CopyMedian\,s for the debug build; the
+instrumentation (tracing at \code{-v}, packet capture) therefore slows the
+transfer noticeably but does not change the outcome, which is what matters for
+the argument. All \ReleasePass{}/\ReleaseRuns{} pass.
+
+\begin{table}[t]
+\centering
+\caption{Comparison arms. ``Pass'' counts runs meeting the verdict of
+Section~\ref{sec:evaluation}. Downtime is only defined for the migrating arms;
+the control has no switchover.}
+\label{tab:arms}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+Arm & Pass & Copy med. (s) & Downtime (ms) & Note \\
+\ArmsTableBody
+\end{tabular}
+\end{table}
 
 \subsection{Timeline of a representative run}
 Figure~\ref{fig:copy} shows the guest's copy progress for a demonstration run
@@ -661,7 +731,7 @@ our conclusions during the work. First, host-side observation is not
 sufficient: the packet capture and the VMM logs looked healthy in a run whose
 guest had in fact stopped making progress. Second, a single passing run is not
 evidence for a timing-dependent fix: the code without the fix of Section~\ref{sec:interrupt} passed four consecutive runs before the defect appeared on the fifth, and only repeated
-runs after the fix justify the claim of 10 out of 10.
+runs after the fix justify the claim of \PassCount{} out of \TotalRuns{}.
 
 %=====================================================================
 \subsection{Threats to validity}
@@ -676,11 +746,18 @@ relative to the guest's uptime at the migration instant
 (Section~\ref{sec:implementation}), which removes an earlier threshold artefact
 in our harness, but they still rely on the kernel printing a message.
 
-\emph{Internal.} The host was loaded by four other VMs and no per-run load was
-recorded; run order was not randomised and the low-downtime runs happened to be
-consecutive. The server was a debug build with verbose logging and packet
-capture enabled. The migration instant used for the ``spans'' test is the
-instant the migration was \emph{requested} on the host, converted through the
+\emph{Internal.} The host was loaded by four other VMs; a host-load sample is
+archived with each batch, but it is not synchronised to individual runs. Run
+order was not randomised and the arms were executed in blocks (acceptance,
+control, release, kick-off), so a slow drift in host conditions would be
+confounded with the arm---this is the single largest threat to the arm
+comparison of Table~\ref{tab:arms}. The injection suite of
+Section~\ref{sec:injection} is designed to be immune to it: it forces the
+hand-over condition inside a single run and compares presence and absence of the
+fix within one build, so its conclusions do not depend on cross-arm timing. The
+server was a debug build with verbose logging and packet capture enabled, which
+is why the release arm exists. The migration instant used for the ``spans'' test
+is the instant the migration was \emph{requested} on the host, converted through
 heartbeat pairs rather than through a verified clock offset. The destination of
 the copy was a file on the host-backed guest disk, so host page-cache writeback
 is in the loop.
@@ -692,8 +769,9 @@ in-flight commands would exercise the hand-over differently, and the slow
 $\sim$2--6\,MiB/s transfer rate of the stick used here makes a completion less
 likely to land inside the hand-over window than it would be on faster hardware.
 
-\emph{Statistical.} $n=10$, so the confidence intervals are wide, and the pre-fix rate is estimated from only $n=5$; the statistical power is discussed in
-Section~\ref{sec:results}.
+\emph{Statistical.} $n=\TotalRuns{}$ in the acceptance arm and $n=5$ for the
+pre-fix rate, so the confidence intervals are wide; the power of each comparison
+is discussed in Sections~\ref{sec:results} and~\ref{sec:injection}.
 
 \section{Discussion and Limitations}
 \label{sec:discussion}

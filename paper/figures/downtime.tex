@@ -1,13 +1,15 @@
-% Figure: measured live-migration downtime for the ten acceptance runs.
+% Figure: measured live-migration downtime for the acceptance runs.
 % Columns of data/runs.dat: run index, downtime (ms), copy duration (s).
+% The number of runs is not hard-coded: the axis follows data/runs.dat, which
+% paper/update-results.py regenerates from the batch CSV.
 \begin{tikzpicture}
 \begin{axis}[
   width=\columnwidth, height=4.6cm,
-  ybar, bar width=6pt,
-  xlabel={run},
+  ybar, bar width=4.5pt,
+  xlabel={acceptance run},
   ylabel={downtime (ms)},
-  xmin=0.4, xmax=10.6, ymin=0, ymax=20,
-  xtick=data,
+  xmin=0.2, ymin=0, ymax=24,
+  xtick distance=5,
   grid=major, grid style={gray!22},
   tick label style={font=\scriptsize},
   label style={font=\scriptsize},
