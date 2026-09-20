@@ -61,35 +61,43 @@ KNOWN_BAD_SHA256 = {
         "a personal name, first token",
 }
 
-# Generic categories reported as notes, never as failures: upstream project URLs,
-# private lab addresses in vendor documentation and toolchain paths are all
-# legitimate, and treating them as failures would train the reader to ignore the
-# check. Only the digest table and --patterns decide the exit status.
+# Generic categories: reported for file contents and paths. Only the digest table
+# and --patterns decide the exit status, because upstream project URLs, private
+# lab addresses in vendor documentation and toolchain paths are legitimate and
+# treating them as failures would train the reader to ignore the check.
+#
+# These are deliberately also run over file *text*: an earlier version applied
+# them only to paths, so a line containing a proxy URL or a host name produced no
+# note at all.
 GENERIC = [
     ("a GitHub URL", r"github\.com/[A-Za-z0-9_.-]+"),
     ("a private IPv4 address", r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"),
     ("a host-specific path", r"/(?:home|root)/[A-Za-z0-9_.-]+/"),
 ]
 
-SEPARATORS = r"[\s\"'`()\[\]{}<>,;.=:/]+"
+SPLIT = r"[\s\"'`()\[\]{}<>,;.=:/@+]+"
+JOINS = (" ", "-", "", ".", ":", "/", "@")
 
 
 def candidates(text: str) -> list[str]:
-    """Every token and 1-3 token window under space, hyphen and empty joins.
+    """Every token and 1-6 token window under the plausible joins.
 
-    A name can appear spaced, hyphenated or run together, and a file name can
-    carry it with a different case, so both the raw and the lower-cased forms are
-    returned.
+    A secret can appear spaced, hyphenated, run together, dotted, colon- or
+    slash-separated (an address, a proxy URL, a host name), and a file name can
+    carry it in a different case, so all joins and both cases are produced. An
+    earlier version only joined with space, hyphen and the empty string, which
+    meant dotted addresses and host names were never formed and could not match
+    their own digests.
     """
-    words = [w for w in re.split(SEPARATORS, text.replace("-", " ").replace("_", " ")) if w]
-    out = []
+    words = [w for w in re.split(SPLIT, text.replace("-", " ").replace("_", " ")) if w]
+    out: list[str] = []
     for n in (1, 2, 3, 4, 5, 6):
         for i in range(len(words) - n + 1):
             window = words[i:i + n]
-            for sep in (" ", "-", ""):
+            for sep in JOINS:
                 out.append(sep.join(window))
     out.append(text)
-    out.extend([t for t in re.split(SEPARATORS, text) if t])
+    out.extend([t for t in re.split(SPLIT, text) if t])
     return out
 
 
@@ -130,7 +138,9 @@ def tracked_files() -> list[str]:
 def scan(paths: list[str], extra: list[str]) -> int:
     hits = 0
     for rel in paths:
-        hits += sum(1 for h in hits_in(rel, extra) if h)
+        for h in hits_in(rel, extra):
+            print(f"{rel}: path: {h}")
+            hits += 1
         p = os.path.join(ROOT, rel)
         try:
             with open(p, "rb") as fh:
@@ -138,9 +148,12 @@ def scan(paths: list[str], extra: list[str]) -> int:
         except OSError:
             continue
         text = raw.decode("utf-8", "replace")
+        # Generic detectors run over contents as well as paths; an earlier
+        # version only looked at the path, so a line carrying a proxy URL or a
+        # host name produced no note at all.
         for label, pat in GENERIC:
-            for _ in re.finditer(pat, rel):
-                print(f"note: {rel}: path matches {label}")
+            for _ in list(re.finditer(pat, rel)) + list(re.finditer(pat, text))[:5]:
+                print(f"note: {rel}: matches {label}")
         for h in hits_in(text, extra):
             print(f"{rel}: {h}")
             hits += 1
@@ -150,29 +163,45 @@ def scan(paths: list[str], extra: list[str]) -> int:
 def selftest() -> int:
     """Prove the detector works, without containing any real secret.
 
-    A synthetic string and its digest stand in for a real name, so the test can
-    exercise file contents, file paths and cwd-independence with no leaking
-    literal.
+    Synthetic strings and their digests stand in for real ones, so the test can
+    exercise contents, paths, several join forms and the absence of false
+    positives with no leaking literal. The fixtures cover a hyphenated word, a
+    dotted name and a colon-separated token, because an earlier version tested
+    only the hyphenated form - exactly the one the generator already supported -
+    and therefore could not reveal that dotted addresses and host names were
+    never formed.
     """
-    synthetic = "synthetic-identifier-do-not-ship"
-    digest = hashlib.sha256(synthetic.encode()).hexdigest()
-    KNOWN_BAD_SHA256[digest] = "test fixture"
+    fixtures = ["synthetic-identifier-do-not-ship", "synthetic.example",
+                "synthetic:1080"]
+    added = []
     try:
-        return _selftest_body(synthetic)
+        for s in fixtures:
+            d = hashlib.sha256(s.encode()).hexdigest()
+            KNOWN_BAD_SHA256[d] = "test fixture"
+            added.append(d)
+        return _selftest_body(fixtures)
     finally:
-        # The synthetic digest must not leak into the subsequent scan: the
-        # fixture string is in this file, so leaving it in would make the
+        # The synthetic digests must not leak into the subsequent scan: the
+        # fixture strings are in this file, so leaving them in would make the
         # checker report itself.
-        KNOWN_BAD_SHA256.pop(digest, None)
+        for d in added:
+            KNOWN_BAD_SHA256.pop(d, None)
 
 
-def _selftest_body(synthetic: str) -> int:
+def _selftest_body(fixtures: list[str]) -> int:
     ok = True
-    if not hits_in(f"prefix {synthetic} suffix", []):
-        print("selftest FAIL: body text not detected")
+    hyphenated, dotted, colon = fixtures
+    if not hits_in(f"prefix {hyphenated} suffix", []):
+        print("selftest FAIL: hyphenated body text not detected")
         ok = False
-    if not hits_in(f"docs/{synthetic}-note.md", []):
+    if not hits_in(f"docs/{hyphenated}-note.md", []):
         print("selftest FAIL: file path not detected")
+        ok = False
+    if not hits_in(f"proxy is at {dotted} today", []):
+        print("selftest FAIL: dotted address inside a sentence not detected")
+        ok = False
+    if not hits_in(f"listening on {colon}", []):
+        print("selftest FAIL: colon-separated token inside a sentence not detected")
         ok = False
     if hits_in("a perfectly ordinary sentence", []):
         print("selftest FAIL: false positive on clean text")

@@ -619,7 +619,7 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 
 **处置**：
 1. 清空 `/tmp`（`find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +`），内存与 Shmem 立即回落；
-2. 用户重启 101 并重新挂载 `/mnt/mt`（`//192.168.100.7/fileserver`，14 TB，余 6.6 TB）；
+2. 用户重启 101 并重新挂载 `/mnt/mt`（`//<share-host>/<share-name>`，14 TB，余 6.6 TB）；
 3. 新增 `scripts/archive-pcaps-to-mnt.sh`：把 161 个 `usb.pcap`（**20.5 GB**）搬到
    `/mnt/mt/usbvfiod-artifacts/`，先复制成功再删源、按 run 名+大小+sha256 去重、
    并重建各批次 `SHA256SUMS` 与 `PCAPS.md` 指针。
