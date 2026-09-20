@@ -308,3 +308,74 @@ debug 构建复制要 13–38 s，所以从未暴露；**release 构建只要 6.
 | 注入 guard-off | **0/5** | 确定性；$p<0.001$ |
 | 朴素热拔插 | 0/3 | `USB disconnect` + I/O error，dd rc=1 |
 | 暴露度（暂停锚定） | 8/20（40%） | 10 个完成事件；请求锚定上界为 11/20、24 |
+
+---
+
+## 第八部分：轮次 4 评审结论与处理（2026-09-20）
+
+三位**全新**审稿人复核后仍为 **Minor Revision ×3**：核心科学结论已被接受，剩下的都是
+"叙述/脚本与证据不一致"。本部分记录并逐条关闭。
+
+### 8.1 最严重：暴露窗口的锚点仍偏早（方法学，第二轮指出）
+
+上一轮把窗口起点改成"源端暂停"，但暂停时刻是用 `migration.epoch + (paused − req)` 算的，
+而 `migration.epoch` 是 harness **启动 ch-remote 之前**记录的，比真正的请求早 **0.9–4.6 ms**。
+
+**修复**：不再依赖 `migration.epoch`，而是**用两条因果相邻的事件对把 CH 自己的 uptime 时钟
+与墙钟对齐**：CH 的 `Enabling IRQ` ↔ usbvfiod 第一次 `set IRQs`；CH 的 `Disabling IRQ` ↔
+`ignoring IRQ disable`。20 次运行中这两对给出的原点相差 **≤0.19 ms**。据此同时给出三个锚点：
+
+| 锚点 | 有风险的运行 | 完成事件 | 窗口 |
+|---|---|---|---|
+| **CH 时钟（下界，论文采用）** | **4/20（20%）** | **4** | 2.11–13.36 ms |
+| harness epoch（上界） | 8/20（40%） | 10 | 3.0–17.7 ms |
+| 迁移请求（严格上界） | 11/20（55%） | 24 | ≤23.9 ms |
+
+论文改为以下界为头条数字、同时列出另两个，并说明真值在 CH 时钟与 harness epoch 之间。
+另外把"复制在切换后至少还剩 \SpanMarginMin 秒"改为**生成**的数字（验收臂 9.50 s），
+替换原先手写的"约 7 s"。
+
+### 8.2 多重比较未控制（方法学）
+
+论文现在明确把六个对比列为同一族并做 **Holm** 校正：**归属守卫（$p<0.0001$）与 5 s 对（$p=0.007$）
+存活，500 ms 对比（$p=0.044$）不存活**。正文把 500 ms 结论从"effect is clear"改为
+"nominal only"，并声明踢中断的作用由 5 s 臂确立。所有 Fisher $p$ 值都标注为双侧。
+
+### 8.3 make-manifest 仍有 fail-open（方法学）
+
+归档工具 `guest/make-manifest.py` 仍把缺失的 downtime 传成 `"0"` 且不使用 `src.log`——
+审稿人构造了一个删掉停机行的真实运行目录，manifest 判 PASS 而 `verdict.py` 判 FAIL。
+**修复**：原样传递（缺失即 FAIL）、传 `--src-log`、对放大窗口臂使用 12000 ms 预算、
+并在复现配方里写出 `--src-log`。
+
+### 8.4 逐条关闭的其余意见
+
+| 来源 | 意见 | 处理 |
+|---|---|---|
+| 方法学 | `migration.done` 仍被描述为"switchover complete" | 全文改正：请求由 harness 记录，完成时刻取自 CH 日志 |
+| 方法学 | 中文摘要的控制臂写成普通 8/8 | 补"仅校验和判定" |
+| 方法学 | 中文摘要的暴露度只有单一锚点 | 补三个锚点 |
+| 方法学 | "three orders of magnitude" 偏大 | 改为 "two to three"（5 s 是自然窗口的 280–1670 倍） |
+| 方法学 | 工具注释里 "11/20" 是被取代的请求锚定数字 | 改为 CH 时钟 4/20（并列出另两个） |
+| 方法学 | `injection-suite.sh` 写 window-loss 8 次而发表为 10 次 | 改为 10 |
+| 方法学 | 附录缺少扩展/重判脚本 | 补 `extend-injection.sh`、`phase-e-and-winlong.sh`、`reverify-batch.py` |
+| 系统 | 手写"约 7 s"边距错了（真值验收臂 9.5 s，全臂 1.26 s） | 改为生成的 `\SpanMarginMin`（验收臂 9.50 s） |
+| 系统 | "both recorded by the harness" 与实现不符 | 改为"请求由 harness 记录、完成取自 CH 日志" |
+| 系统 | 381/28 是 PR 分支的 diff | 明确标注，并给出当前树 483/103（七文件合计 516/104） |
+| 系统 | reset 缺陷被列在"确定性"里但没有消融 | 改为 "deterministic by inspection" |
+| 系统 | "between 2 and 2" | 改为 "exactly 2" |
+| 写作 | `redact-identifiers.py` 自己泄露了密钥 | 改为只存 SHA-256 摘要 + 通用检测；实测 OK |
+| 写作 | 文件名/正文含人名 | 重命名为 `migration-paper-proposal.md` 并脱敏 |
+| 写作 | 仓库 `.git`（origin、commit 作者）仍可识别作者 | 新增 `make-anonymous-snapshot.sh`，用 `git archive` 产出无 `.git` 的附件 |
+| 写作 | demo 脚本文档仍写 5 s 臂 0/3 | 改为 2/8；DEVLOG D14 就地标注被 D15 取代 |
+| 写作 | 中文摘要 guard 写 $p<0.001$ | 与宏对齐为 $<0.0001$ |
+| 写作 | 空批次时 `update-results.py` 除零崩溃 | 补 `n==0` 守卫，输出 `?` 占位 |
+| 写作 | "four comparison arms" | 改为 three + 单独报告的朴素基线 |
+| 写作 | libvirt 那句把 detach/re-attach 归给 libvirt | 改为归给 QEMU `usb-host`，libvirt 只提供"允许迁移"的注释 |
+
+### 8.5 本轮仍未做／已知边界
+
+- 自然窗口下踢中断的统计显著性仍不成立（7/8 vs 20/20，$p=0.286$，效力 0.067）；其必要性由
+  受控放大窗口（500 ms 名义、5 s 经 Holm 存活）确立。论文已如实声明。
+- reset 解析修复没有消融臂，已降级为"由源码与未打补丁构建的行为确立"。
+- 跨主机、多设备、USB 3.0/UAS、显式 quiesce 仍为范围外。
