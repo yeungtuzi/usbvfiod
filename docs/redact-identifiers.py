@@ -5,7 +5,10 @@ The manuscript is prepared for double-blind review and says the harness and the
 development log accompany the submission, so those files must not name the
 authors, their hosts or their accounts. This checker stores only SHA-256 digests
 of the strings that were removed, plus generic detectors; it never contains one
-of those strings, so it can verify their absence without publishing them.
+of those strings, so it can verify their absence without publishing them. The
+digests are of low-entropy identifiers and are therefore reversible in
+principle; the mitigation is that this repository must not be public while the
+submission is under double-blind review.
 
 Usage:
     redact-identifiers.py            report anything identifying; exit 1 if found
@@ -20,8 +23,9 @@ Design notes, because earlier versions of this file failed in three ways:
   * it used `git ls-files` from the caller's working directory, so the same tree
     could pass from the repository root and fail from a subdirectory, and outside
     a repository it scanned the caller's directory instead and still said OK.
-    It now chdirs to its own repository root and fails closed if that is not a
-    repository;
+    It now chdirs to its own repository root; when there is no .git (an exported
+    snapshot) it walks that root rather than failing, so the artefact itself can
+    be verified;
   * it scanned only file contents, so the hyphenated *file name* that started
     this whole thread would have slipped through. Paths are scanned too.
 """
@@ -59,6 +63,8 @@ KNOWN_BAD_SHA256 = {
         "a personal name, run together",
     "579dac7228d7ead91ee9fb0b35401b0d6730cbeb5eee4ef96546a2804c672f42":
         "a personal name, first token",
+    "4243718ce7098065effba94758430ce7d229b2dbeeea34fce6a6e9ce26d7fc4e":
+        "a personal name, bare",
 }
 
 # Generic categories: reported for file contents and paths. Only the digest table
@@ -98,6 +104,10 @@ def candidates(text: str) -> list[str]:
                 out.append(sep.join(window))
     out.append(text)
     out.extend([t for t in re.split(SPLIT, text) if t])
+    # A secret can mix separators within one token (a proxy URL, a qualified
+    # host name with a port), which no single-join window can reconstruct, so
+    # the whitespace-delimited tokens themselves are candidates too.
+    out.extend(text.split())
     return out
 
 
