@@ -44,6 +44,16 @@ sleep 0.5
 
 log() { printf '[demo] %s\n' "$*"; }
 
+# Milestone marker. With PAUSE=1 the demo waits for Enter so it can be narrated
+# live; the default stays fully automatic.
+step() {
+  printf '\n[demo] ==== %s ====\n' "$*"
+  if [ "${PAUSE:-0}" = "1" ]; then
+    printf '        (press Enter to continue / 按 Enter 继续) '
+    read -r _ || true
+  fi
+}
+
 wait_for() { # wait_for <pattern> <file> <timeout-seconds>
   local pat="$1" file="$2" tmo="$3" i=0
   while [ "$i" -lt "$tmo" ]; do
@@ -69,7 +79,7 @@ wait_api() { # wait_api <socket> <name>
 USB_PID=$!; pids+=($USB_PID)
 for _ in $(seq 1 40); do [ -S "$RUN/usbvfiod.sock" ] && break; sleep 0.25; done
 if grep -q 'Attached' "$RUN/usbvfiod.log"; then
-  log "usbvfiod attached $DEVICE"
+  step "1/6 usbvfiod claimed $DEVICE (host driver switched to usbfs)"
 else
   log "ERROR: usbvfiod did not attach $DEVICE"; tail -5 "$RUN/usbvfiod.log"; exit 1
 fi
@@ -84,11 +94,11 @@ fi
   --cmdline "root=/dev/vda rw console=ttyS0" > "$RUN/src.log" 2>&1 &
 SRC_PID=$!; pids+=($SRC_PID)
 wait_api "$RUN/src.sock" source || exit 1
-log "source VM booted; waiting for the guest to start copying"
+step "2/6 source VM booted; guest will mount the stick and start copying"
 wait_for "DEMO-COPY: COPY_START" "$RUN/console.log" "$BOOT_TIMEOUT" || {
   log "ERROR: the guest never started copying"; tail -40 "$RUN/console.log"; exit 1
 }
-log "copy is running; letting it get in flight for ${COPY_LEAD_SECONDS}s"
+step "3/6 copy in flight (${COPY_LEAD_SECONDS}s); migrating now"
 sleep "$COPY_LEAD_SECONDS"
 
 # --- 3. destination VM + live migration -------------------------------------
@@ -100,12 +110,13 @@ wait_api "$RUN/dst.sock" destination || exit 1
 pids+=($!)
 sleep 2
 
-log "sending migration"
+step "4/6 starting the live migration"
 MIGRATION_EPOCH=$(date +%s.%N)
 "$CHR" --api-socket "$RUN/src.sock" \
   send-migration destination_url=unix:"$RUN/mig.sock",memory_mode=memfds,downtime_ms=300,timeout_strategy=cancel \
   > "$RUN/send.log" 2>&1
 log "send-migration exit=$?"
+step "5/6 migration issued; the copy must continue on the destination"
 echo "$MIGRATION_EPOCH" > "$RUN/migration.epoch"
 
 # --- 4. wait for the copy to report completion (console is best effort) -----
@@ -113,7 +124,7 @@ wait_for "DEMO-COPY: MD5_DONE" "$RUN/console.log" "$COPY_TIMEOUT" \
   || log "note: MD5_DONE not seen on the (best-effort) console; falling back to the guest log"
 
 # --- 5. post-mortem: read the guest's own log from the disk image -----------
-log "stopping VMs and reading the guest log from rootfs.img"
+step "6/6 stopping the VMs and verifying from the guest log"
 stop_vms
 MNT="$RUN/guestfs"; mkdir -p "$MNT"
 # Mount read-write: ext4 has to replay its journal after the VM was killed,
