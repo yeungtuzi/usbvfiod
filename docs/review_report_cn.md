@@ -466,3 +466,41 @@ bootstrap 中位数区间 [5,17]、宿主负载相关系数 −0.376、最近枚
 | 若干脚本输出根目录写死 | 改为 `REPLUG_ROOT` / `INJECT_ROOT` / `RUNROOT` 可覆盖 |
 | 两个 Overfull hbox（34.6 pt / 26.8 pt） | 缩短表注与代码标记，重建后归零 |
 
+
+---
+
+## 第十一部分：轮次 6–8 最终结论（2026-09-20）
+
+| 轮次 | 系统方向 | 实验方法学 | 写作与工件 |
+|---|---|---|---|
+| 6 | **Accept** | **Accept** | 不通过（工件：检查脚本含人名原文 + 自我豁免） |
+| 7 | — | — | 不通过（工件：tar 的 pax 头里带 commit id → 可解析到公开 fork） |
+| 8 | — | — | **Accept**（"the tarball is safe to attach"） |
+
+**三条轴全部 accept，目标达成。**
+
+### 11.1 写作/工件轴两次打回的原因与修复（均为我自己的工具缺陷）
+
+1. **轮次 6**：`docs/redact-identifiers.py` 的**注释里写着人名的三种写法**，且 `ALLOW` 把自己排除在扫描之外，
+   于是"检查通过"却输出了含人名的快照。修复：注释去字面量化、取消自我豁免、固定仓库根、
+   路径也扫描、新增 `--selftest`。
+2. **轮次 7**：`git archive` 生成的 tar 带 `pax_global_header: comment=<commit id>`，
+   该 commit 可解析到公开 fork；`--format=zip` 同理。检查器结构上看不到归档元数据。
+   修复：导出后用普通 gnu tar 重打包（固定 mtime、uid/gid 归零、`gzip -n`），
+   断言 `git get-tar-commit-id` 为空，**在解包后的归档内部**从两个 cwd 复跑检查器，
+   并且**工作区不干净时拒绝执行**。
+
+### 11.2 轮次 8 之后又做的一处加固（审稿人非阻塞建议）
+
+单一分隔符窗口无法重构"混合分隔符"密钥（如完整代理 URL），因此
+`docs/redact-identifiers.py` 现在把**按空白切分的原始 token** 也作为候选，
+并补上"裸人名"摘要；`refs.bib` 中未被引用的条目已删除（24 条全部被引用）。
+
+### 11.3 交付物
+
+- 论文：`paper/main.pdf`（13 页）、`paper/abstract_zh.pdf`（2 页）
+- 仓库：`origin/main` = `632dc09`
+- 匿名快照：`/root/lvllm/usbvfiod-anonymous.tar.gz`
+  （sha256 `bcd17fcc…`，无 `.git`、无 commit id，解包后检查器从两个 cwd 均通过）
+- 原始证据：文本日志在 `artifacts/`；161 个 pcap（20.5 GB）在
+  `/mnt/mt/usbvfiod-artifacts/`，附 `SHA256SUMS-pcap`
