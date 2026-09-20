@@ -156,10 +156,12 @@ if ! mount -t exfat -o ro /dev/sda1 /mnt/usb; then
 fi
 say "DEMO-COPY: SOURCE_READY $(date +%s.%N)"
 ls -l /mnt/usb/testfile.bin >> "$LOG" 2>&1 || { say "DEMO-COPY: ERROR no testfile"; exit 1; }
-# Remove any copy left by a previous boot: the heartbeat reports the size of
-# this file as progress, and a stale 128 MiB file would make it look finished
-# before dd has read a single block.
-rm -f /root/testfile.copy
+# Truncate before announcing COPY_START: the heartbeat reports the size of this
+# file as progress, and if a copy left by a previous boot were still present the
+# host could see a full-size "progress" reading before dd has read a block. The
+# harness also ignores heartbeats that precede COPY_START, so the two guards are
+# independent.
+: > /root/testfile.copy
 say "DEMO-COPY: COPY_START $(date +%s.%N)"
 dd if=/mnt/usb/testfile.bin of=/root/testfile.copy bs=1M status=progress 2>> "$LOG"
 # capture the status first: $(date ...) would otherwise reset $?

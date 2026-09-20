@@ -227,13 +227,19 @@ impl EventWorker {
                     #[cfg(not(debug_assertions))]
                     let suppressed = false;
 
+                    // Logged unconditionally, and separately from the kick, so
+                    // that the hand-over instant can be located in the log even
+                    // in the negative-control build where the kick is
+                    // suppressed. The harness counts these lines as
+                    // "interrupt lines installed".
+                    info!("interrupt line installed");
                     if suppressed {
                         warn!("interrupt kick suppressed by USBVFIOD_DISABLE_IRQ_KICK (test hook)");
                     } else {
                         self.interrupt_line.interrupt();
-                        // Counted by the harness as evidence that the hand-over
-                        // path was exercised in a given run.
-                        info!("interrupt line installed: re-raising one interrupt to cover the hand-over window");
+                        // Counted by the harness as evidence that the kick was
+                        // actually issued in a given run.
+                        info!("re-raising one interrupt to cover the hand-over window");
                     }
                 }
                 InterrupterMessage::Reset(completion) => {

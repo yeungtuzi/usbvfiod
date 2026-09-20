@@ -23,6 +23,7 @@
 \newcommand{\code}[1]{\texttt{#1}}
 \setlength{\emergencystretch}{2em}
 \input{data/results.tex}
+\input{data/progress_meta.tex}
 
 \title{Keeping a Passed-Through USB Storage Device Alive\\
 across Same-Host VM Live Migration with a\\
@@ -57,7 +58,11 @@ while the first client is still connected. We identify and fix two defects that 
 guest's own log rather than from host-side observation.
 On a real 32\,GB exFAT stick passed through to an Ubuntu 22.04 guest, a
 128\,MiB file copy that spans the migration completes in \PassCount{} out of \TotalRuns{} runs with a measured downtime of \DowntimeMin--\DowntimeMax\,ms, byte-identical data and, at the USB
-level, no re-enumeration, no reset and no I/O error in the guest.
+level, no re-enumeration, no reset and no I/O error in the guest. A
+no-migration control, a release-build arm, a kick-disabled negative control and
+a naive detach/re-attach baseline separate the fixes from the conditions, and a
+fault-injection suite that enlarges the hand-over window on purpose shows that
+both hand-over fixes are load-bearing rather than incidental.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -497,7 +502,19 @@ to a file and treat the serial console as a best-effort mirror, and we compute
 the verdict from the guest's own log after stopping the VMs and mounting the
 disk image---with the journal replayed, because a read-only \code{noload} mount
 hides the most recent writes. A guest heartbeat service, finally, distinguishes
-``guest frozen'' from ``console broken''.
+``guest frozen'' from ``console broken'', and reports the size of the in-progress
+copy so the harness can place the migration at a fixed fraction of the transfer
+rather than after a fixed wall-clock lead.
+
+\emph{Fault injection.} Two hooks in the server exist only in debug builds and
+only take effect when an environment variable is set, so an ordinary run cannot
+reach them: one sleeps for a configured number of milliseconds inside the
+\code{SetIrqs} handler \emph{before} the new interrupt line reaches the
+interrupter worker, and the other makes every connection believe it owns the
+device, which reintroduces the stale-teardown defect. They are what turns the
+hand-over window from a race that happens by chance into one that happens by
+construction; Section~\ref{sec:injection} uses them, and the first row of that
+section's table checks that they are inert when unset.
 
 %=====================================================================
 \section{Evaluation}
@@ -648,20 +665,42 @@ Arm & Pass & Copy med. (s) & Downtime (ms) & Note \\
 \end{tabular}
 \end{table}
 
+\subsection{The naive alternative: detach and re-attach}
+\label{sec:baseline}
+The obvious way to move a passed-through device to another VM without changing
+the host-side server is to let the host-side session go and make a new one:
+detach the device, then attach it again. We measured what the guest sees in that
+case with the same workload and the same guest-log criteria, replacing the
+migration with a hotplug detach four seconds into the copy and a re-attach five
+seconds later.
+
+In all \ReplugRuns{} baseline runs the guest re-enumerated the device after the
+detach moment, and while the copy did complete in \ReplugCompleted{} of
+\ReplugRuns{} runs with a matching digest in \ReplugMd5Match{}, the guest saw up
+to \ReplugReenumMax{} enumerations, \ReplugResetsMax{} resets and
+\ReplugIOErrMax{} lines mentioning an I/O error or a failed request. That is the
+disturbance the design avoids, and it is the same class of event as the one
+Section~\ref{sec:problem} attributes to tearing the session down---except that
+here the guest sees it directly, because the device genuinely disappeared and
+came back.
+
 \subsection{Timeline of a representative run}
-Figure~\ref{fig:copy} shows the guest's copy progress for a demonstration run
-(not one of the ten acceptance runs) together with the migration instant. The copy curve is not perfectly smooth, but it continues across the migration and
-finishes with $rc=0$; the guest never restarts the transfer. The final
-throughput in this run was $5.7$\,MB/s ($5.4$\,MiB/s), consistent with the stick's USB~2.0
-read performance measured outside the migration.
+Figure~\ref{fig:copy} shows the guest's copy progress for run \ProgressRun{} of
+the acceptance arm, taken from the copy size the guest reports in its own
+heartbeat. The curve is not perfectly smooth, but it continues across the
+migration and finishes with $rc=0$; the guest never restarts the transfer. The
+mean throughput of this run ($128$\,MiB in \ProgressCopyDuration\,s) is
+consistent with the stick's USB~2.0 read performance measured outside the
+migration.
 
 \begin{figure}[t]
 \centering
 \input{figures/copy_progress.tex}
-\caption{Guest copy progress in a demonstration run (128\,MiB), not one of the
-ten acceptance runs of Table~\ref{tab:results}. The migration occurs at
-$t=7.39$\,s, inside the copy window; the copy completes at $t=23.54$\,s with
-status 0.}
+\caption{Guest copy progress in acceptance run \ProgressRun{} (128\,MiB). The
+migration is requested at $t=\ProgressMigPoint$\,s, with
+$\ProgressMigMiB$\,MiB copied, and the copy completes at
+$t=\ProgressCopyDuration$\,s with status~0: the transfer continues across the
+hand-over.}
 \label{fig:copy}
 \end{figure}
 
@@ -867,8 +906,11 @@ device, so the device lock does not have to be held for the lifetime of a
 connection. On top of that, two further defects had to be fixed before the
 hand-over was correct rather than merely possible: ownership of destructive
 teardown, and the synchronisation of the interrupt line across the hand-over.
-With those in place, a 128\,MiB copy that spans the migration completes in 10
-out of 10 runs with 4--18\,ms of downtime and byte-identical data.
+With those in place, a 128\,MiB copy that spans the migration completes in
+\PassCount{} out of \TotalRuns{} runs with \DowntimeMin--\DowntimeMax\,ms of
+downtime and byte-identical data; the kick-disabled and guard-disabled
+injections, and the enlarged-window injections, show that both hand-over fixes
+are load-bearing rather than incidental.
 
 Future work falls into three groups. First, an explicit quiesce and a
 guest-cooperative protocol would make in-flight behaviour deterministic instead
@@ -884,10 +926,11 @@ ownership rules we introduced would need to become per-device.
 \section{Reproduction}
 %=====================================================================
 
-The full harness, the development log and the raw measurement data are in the
-project repository at \url{https://github.com/yeungtuzi/usbvfiod} (the guest
-harness under \code{guest/}, the paper and its figures under \code{paper/}, and
-the development log under \code{docs/DEVLOG\_cn.md}). In outline:
+The full harness, the development log and the raw measurement data accompany
+this submission as an artefact (the guest harness under \code{guest/}, the paper
+and its figures under \code{paper/}, the run logs and driver scripts under
+\code{artifacts/} and the development log under \code{docs/DEVLOG\_cn.md}). The
+repository location is omitted here for double-blind review. In outline:
 
 \begin{enumerate}
   \item build the guest image: \code{guest/build-guest.sh};
@@ -896,7 +939,12 @@ the development log under \code{docs/DEVLOG\_cn.md}). In outline:
   \item run \code{guest/usb-migration-demo.sh} (add \code{PAUSE=1} for a
         step-by-step narrated run);
   \item read the verdict, which is derived from the guest's own log as
-        described in Section~\ref{sec:implementation}.
+        described in Section~\ref{sec:implementation};
+  \item reproduce the whole measurement set with \code{guest/campaign-b.sh all}
+        (acceptance, controls and the naive baseline) and
+        \code{guest/injection-suite.sh} (the fault-injection arms);
+  \item archive each batch with \code{guest/collect-artifacts.sh}, which writes
+        per-file SHA-256 checksums and a manifest next to the raw logs.
 \end{enumerate}
 
 \bibliographystyle{IEEEtran}

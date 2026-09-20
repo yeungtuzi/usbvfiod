@@ -32,6 +32,19 @@ PATTERNS = {
 }
 
 
+def grab(pattern: re.Pattern, text: str) -> str:
+    """First capture group if the pattern has one, else the whole match.
+
+    The control marker ("CONTROL RESULT") is used as a presence test and has no
+    group; assuming every pattern had one crashed the summariser on the control
+    batch.
+    """
+    m = pattern.search(text)
+    if not m:
+        return ""
+    return m.group(1) if pattern.groups else (m.group(0) or "")
+
+
 def clopper_pearson(k: int, n: int) -> tuple[float, float]:
     """Exact 95% interval via bisection on the regularised incomplete beta."""
     def betacf(a: float, b: float, x: float) -> float:
@@ -141,7 +154,7 @@ def main() -> int:
         if "VERDICT" not in text and "CONTROL RESULT" not in text:
             skipped.append(os.path.basename(path))
             continue
-        m = {k: (p.search(text).group(1) if p.search(text) else "") for k, p in PATTERNS.items()}
+        m = {k: grab(p, text) for k, p in PATTERNS.items()}
         control = bool(m["ctrl_spans"])
         if control:
             ok = m["ctrl_md5"] != "" and m["ctrl_md5"] == m["ctrl_expected"]

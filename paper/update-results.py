@@ -319,14 +319,34 @@ def main() -> int:
     L.append("")
 
     # ---- replug baseline ----
+    rp = []
+    rp_csv = os.path.join(args.replug, "replug.csv")
+    if os.path.exists(rp_csv):
+        for r in csv.DictReader(open(rp_csv)):
+            if r.get("complete") == "True":
+                rp.append(r)
     if replug_runs:
-        L += [
-            "% ---- naive detach/re-attach baseline ----",
-            f"\\newcommand{{\\ReplugRuns}}{{{len(replug_runs)}}}",
-        ]
+        L.append(f"\\newcommand{{\\ReplugRuns}}{{{len(replug_runs)}}}")
     else:
         need(False, f"no replug-baseline runs in {args.replug}")
         L.append("\\newcommand{\\ReplugRuns}{?}")
+    if rp:
+        def mx(key: str) -> str:
+            vals = [int(r[key]) for r in rp if r.get(key, "").lstrip("-").isdigit()]
+            return str(max(vals)) if vals else "?"
+        done = sum(1 for r in rp if r.get("copy_done") == "True")
+        matched = sum(1 for r in rp if r.get("md5_match") == "True")
+        L += [
+            f"\\newcommand{{\\ReplugCompleted}}{{{done}}}",
+            f"\\newcommand{{\\ReplugMd5Match}}{{{matched}}}",
+            f"\\newcommand{{\\ReplugReenumMax}}{{{mx('reenum')}}}",
+            f"\\newcommand{{\\ReplugResetsMax}}{{{mx('resets')}}}",
+            f"\\newcommand{{\\ReplugIOErrMax}}{{{mx('io_errors')}}}",
+        ]
+    else:
+        for m in ("ReplugCompleted", "ReplugMd5Match", "ReplugReenumMax",
+                  "ReplugResetsMax", "ReplugIOErrMax"):
+            L.append(f"\\newcommand{{\\{m}}}{{?}}")
     L.append("")
 
     # ---- per-run table body (debug arm) ----
@@ -343,9 +363,11 @@ def main() -> int:
     def row(label: str, a: Arm, note: str) -> str:
         if not a.n:
             return f"{label} & ? & ? & ? & ? \\\\"
+        dt = a.nums("downtime_ms")
+        dtxt = (f"{min(dt):.0f}--{max(dt):.0f}" if dt else "n/a")
         ci = a.ci()
         return (f"{label} & {a.k}/{a.n} & {a.med('copy_s')} & "
-                f"{a.lo_of('downtime_ms')}--{a.hi('downtime_ms')} & {note} \\\\")
+                f"{dtxt} & {note} \\\\")
 
     L += ["\\newcommand{\\ArmsTableBody}{%", "\\midrule",
           row("Debug, migration", debug, "---"),

@@ -1,0 +1,26 @@
+run                 exposed   events  window_ms
+debug-1                   2     7838       5.20
+debug-2                   0     7831       5.18
+debug-3                   4     7849      23.94
+debug-4                   0     7846      20.83
+debug-5                   3     7840       5.15
+debug-6                   3     7825       5.11
+debug-7                   1     7846       5.03
+debug-8                   1     7843       4.98
+debug-9                   0     7843      22.39
+debug-10                  1     7841      21.15
+debug-11                  1     7831      23.89
+debug-12                  2     7841       5.36
+debug-13                  0     7839      20.75
+debug-14                  3     7836       5.13
+debug-15                  1     7825       5.32
+debug-16                  1     7826       5.18
+debug-17                  0     7838      20.96
+debug-18                  0     7846      20.61
+debug-19                  1     7843       5.10
+debug-20                  0     7831       5.09
+
+runs measured               : 20
+runs with exposure > 0      : 13 (65%)
+total exposed completions   : 24
+worst-case exposed per run  : 4

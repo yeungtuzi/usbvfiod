@@ -418,3 +418,47 @@ release 构建只要 **6.3 s**，同一时序就变成"复制已经结束，迁�
 新批次的 `RUNROOT` 改到磁盘 `/root/usb-runs`（根分区余量 120 GB）；宿主内存已用 56/62 GiB，
 不采用扩大 tmpfs 的做法，以免影响用户正在运行的 4 台虚拟机。
 
+
+## D13. 轮次 3：进度触发器上的第二个缺陷（陈旧输出文件）（2026-09-20）
+
+**发现经过**：D12 把触发方式从"固定墙钟"改成"按复制进度（16 MiB）"后，kickoff 臂第 3 次运行
+在 `copied=6291456`（6 MiB）处**永久卡死**，而触发器本应等到 16 MiB 才迁移。检查 Guest 心跳：
+
+```
+DEMO-HEARTBEAT 1 1789887181 uptime=6.09 copied=134217728   <- 上一轮遗留的 128 MiB 文件
+DEMO-HEARTBEAT 2 1789887182 uptime=7.10 copied=2097152
+...
+DEMO-HEARTBEAT 5 1789887185 uptime=10.17 copied=6291456    <- 此后 118 次心跳都不变
+```
+
+**根因**：`rootfs.img` 在多次运行间复用，`/root/testfile.copy` 是上一轮留下的 **128 MiB** 文件。
+Guest 启动后、`demo-copy.sh` 执行 `rm -f` 之前，心跳已经把它当作"进度"读走（heartbeat 1）。
+宿主侧的 `copy_bytes_seen` 又扫描**整个** `console.log`（包括 COPY_START 之前的心跳），
+于是把 134217728 当成"已达到 16 MiB"，**在目标端就绪的那一刻立刻发起迁移**。
+所谓"按进度触发"实际上退化成了"尽可能早触发"。
+
+**修复（两道独立防线）**
+
+1. Guest：把截断放到**宣告 COPY_START 之前**（`: > /root/testfile.copy`），
+   这样任何 COPY_START 之后的心跳读到的都是真实进度（从 0 开始）。
+2. Host：`copy_bytes_seen` 只扫描 `console.log` 中 **COPY_START 之后**的部分。
+
+**这个缺陷的副产品是一份极有价值的证据**：kickoff 臂的这次失败是"丢失中断导致硬挂起"最干净的单一观测：
+复制精确停在 6 MiB，连续 118 次心跳（118 秒）不变，服务器日志 `interrupt lines installed: 0`
+（踢中断被抑制）、`stale teardowns ignored: 1`，而迁移本身正常完成（停机 17 ms）。
+该批次完整留档在 `/root/usb-runs-accidental-trigger/`（含 `README.md` 说明），
+并与修正后的批次对照，用于说明结论不依赖于迁移落在复制的哪个位置。
+
+**顺带修正的一处可观测性缺陷**：原来 `interrupt line installed: re-raising one interrupt ...`
+这一行只在**执行踢中断**时打印，于是在关闭踢中断的负对照臂里根本**没有**"换线时刻"的日志，
+暴露度分析（`analyze-handover-exposure.py`）对负对照臂直接返回 n/a——而负对照恰恰是最需要暴露度的臂。
+现在拆成两条独立日志：
+
+- `interrupt line installed`（**无条件**打印，用于定位换线时刻）
+- `re-raising one interrupt to cover the hand-over window`（仅在实际踢中断时打印）
+
+harness 的 `kicks` 列也相应改为统计后者（此前误统计前者的数量），CSV 列结构不变。
+
+**教训**：把"触发条件"建立在**跨运行持久化的状态**上（复用磁盘镜像里的文件）是危险的；
+触发条件必须只依赖**本次运行之内**产生的事件（此处即 COPY_START 之后的心跳）。
+

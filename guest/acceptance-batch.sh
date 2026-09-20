@@ -49,7 +49,7 @@ for i in $(seq 1 "$N"); do
   md5=$(grep -aE '^md5 verdict' "$out" | awk -F: '{print $2}' | tr -d ' ')
   le=$(grep -aE '^enumerations after migration' "$out" | awk -F: '{print $2}' | tr -d ' ')
   lr=$(grep -aE '^reset/error lines after migr' "$out" | awk -F: '{print $2}' | tr -d ' ')
-  kicks=$(grep -aE '^interrupt lines installed' "$out" | awk -F: '{print $2}' | tr -d ' ')
+  kicks=$(grep -aE '^interrupt kicks issued' "$out" | awk -F: '{print $2}' | tr -d ' ')
   stale=$(grep -aE '^stale teardowns ignored' "$out" | awk -F: '{print $2}' | tr -d ' ')
   verdict=$(grep -aE '^VERDICT' "$out" | awk -F: '{print $2}' | tr -d ' ')
 

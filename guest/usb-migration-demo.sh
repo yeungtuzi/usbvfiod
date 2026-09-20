@@ -78,10 +78,16 @@ wait_for() { # wait_for <pattern> <file> <timeout-seconds>
 # the size of the in-progress copy ("DEMO-HEARTBEAT n <epoch> uptime=U
 # copied=B"), which is build-speed independent; dd's own progress line (which
 # only goes to the guest log, not the console) is accepted as a fallback.
+#
+# Only heartbeats *after* COPY_START count. A heartbeat from before the copy can
+# still report the size of the previous boot's output file, which would let the
+# migration be requested immediately - exactly the failure this guards against.
 copy_bytes_seen() {
   {
-    grep -aoE 'copied=[0-9]+' "$RUN/console.log" 2>/dev/null | grep -aoE '[0-9]+'
-    grep -aoE '[0-9]+ bytes \([0-9.]+ [kMG]?B' "$RUN/console.log" 2>/dev/null | grep -aoE '^[0-9]+'
+    awk '/DEMO-COPY: COPY_START/{f=1} f' "$RUN/console.log" 2>/dev/null \
+      | grep -aoE 'copied=[0-9]+' | grep -aoE '[0-9]+'
+    awk '/DEMO-COPY: COPY_START/{f=1} f' "$RUN/console.log" 2>/dev/null \
+      | grep -aoE '[0-9]+ bytes \([0-9.]+ [kMG]?B' | grep -aoE '^[0-9]+'
   } | sort -n | tail -1
 }
 
@@ -214,6 +220,7 @@ GLOG="$RUN/guest-demo.log"
 echo "--- hand-over path evidence (server log) ---"
 echo "client handshakes         : $(grep -ac 'Received client version' "$RUN/usbvfiod.log")"
 echo "interrupt lines installed : $(grep -ac 'interrupt line installed' "$RUN/usbvfiod.log")"
+echo "interrupt kicks issued    : $(grep -ac 're-raising one interrupt' "$RUN/usbvfiod.log")"
 echo "stale teardowns ignored   : $(grep -ac 'ignoring IRQ disable from stale' "$RUN/usbvfiod.log")"
 
 echo "================ DEMO RESULT ================"
