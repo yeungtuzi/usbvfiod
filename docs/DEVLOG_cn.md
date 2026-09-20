@@ -589,3 +589,17 @@ CH 的 uptime 锚点，指出**至少 14 个发生在暂停之前**。
 **三轮下来最一致的教训**：审稿人反复攻击的都不是设备代码，而是**测量与判定代码**
 （窗口锚点三次、fail-open 两次、归档与脱敏各一次）。这也是本文最值得保留的部分：
 把"怎么测"当成一等公民来审计。
+
+## D17. 轮次 5 评审：三位都写"nothing blocks acceptance"（2026-09-20）
+
+三位新审稿人一致 **Minor Revision**，并且都明确说不阻塞接受；科学结论与统计方法被认为成立，
+剩余问题全部是文本/工件层面。最值得记录的一条是**我自己的脱敏操作把六个脚本改坏了**：
+把 `/root/lvllm/usbvfiod` 全局替换成 `<repo>` 时误伤了 `guest/campaign-b.sh`、
+`extend-injection.sh`、`phase-e-and-winlong.sh`、`collect-artifacts.sh`、`sample-host-load.sh`、
+`archive-round3.sh`，而这些脚本正是附录推荐的复现路径。审稿人逐个检查了它们能否运行。
+**教训：为了匿名做的批量替换，必须对"可执行工件"单独验证（至少 `bash -n` + 一次空跑）。**
+
+其余修正：中文摘要的"此后再无完成事件"（与 kickoff-5 日志矛盾）、另一处 "three orders of
+magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移请求）、注入小节不可复现的计数区间、
+`verdict.py` 与暴露分析锚点不一致的说明、`injection-suite.sh` 注释、附录重复追加的指引。
+至此论文中所有评测数字均由脚本生成，无手写数字。
