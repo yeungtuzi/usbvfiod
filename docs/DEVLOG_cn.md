@@ -170,8 +170,55 @@ RESULT: mode=userdev send_rc=0 outcome=migrated
 
 ---
 
-## D7. 真实 demo 打通（进行中）
+## D7. 真实 demo 打通（2026-09-20）—— 成功
 
-（下一条记录追加。）
+**目标**：U 盘直通 + Guest 内 128 MiB 文件复制 + 同主机 live migration + 完整性校验。
+
+**结果（权威证据来自 Guest 自己的 `/root/demo.log`）**
+```
+migration line       : Migration completed after 0.0s with a downtime of 4ms (goal was 300ms)
+COPY_START           : 1789880056.772
+COPY_DONE            : 1789880069.733   rc=0
+copy duration        : 13.0 s
+spans migration      : YES   (start < migration epoch < end)
+expected (host)      : d62dd28c4faf1bbe19e300a3b605e503
+read back from stick : d62dd28c4faf1bbe19e300a3b605e503
+copied file          : d62dd28c4faf1bbe19e300a3b605e503
+MD5 VERDICT          : MATCH
+```
+- Guest 复制 **128 MiB** 期间发生迁移，复制**跨越**迁移且**数据完全一致**。
+- 控制台 USB 事件：两次 `new high-speed USB device` **均在 guest uptime `[1.99s]`（开机枚举）**；迁移后**无任何 usb/xhci/sd 消息** → 无重枚举、无 reset、无 I/O error。
+
+**排查过程中的得失（逐步记录）**
+
+1. **失**：首次 demo 失败 —— 复制 17 MB 后 Guest 报
+   `xhci_hcd 0000:00:03.0: xHCI host controller not responding, assume dead` + `dd: Input/output error`。
+   **根因**：usbvfiod 日志显示，**目标端注册 IRQ 之后**、正在退出的源端 CH 又发了 `SetIrqs #fds: 0`（关闭），把共享 backend 的中断线覆盖成 dummy。
+   **得**：`SharedBackendState` 引入 **IRQ 归属者（owner）** 语义——只有最近注册中断的连接才能下发破坏性命令（`SetIrqs` 无 fd / `DmaUnmap`），陈旧客户端的拆除被 `WARN` 记录并忽略（提交 `becc84f`）。
+
+2. **失**：修复后现象不变，且日志里看不到"忽略陈旧 IRQ"。
+   **根因**：我只跑了 `cargo clippy` / `cargo test`，**没有 `cargo build`**，`target/debug/usbvfiod` 仍是旧二进制（12:28 vs 12:40）。
+   **得**：确立"改完源码必须重建二进制再验证"的流程。
+
+3. **失**：修复并重建后复制仍像"停住"。
+   **根因**：Guest 把日志写到 `/dev/ttyS0`；迁移会**重建目标端串口设备**导致 Guest tty 重置，dd 的进度写入失败，看起来像卡死。
+   **得**：Guest 侧改为**文件为主（`/root/demo.log`）+ 串口尽力镜像**；宿主侧改为**挂载 Guest 镜像读取 Guest 自己的日志**作为权威判据。
+
+4. **失**：挂载镜像读到的是**过期数据**（md5 行丢失、心跳仅 7 条），一度误判为"Guest 冻结"。
+   **根因**：VM 被强杀后 ext4 需要日志恢复，而我用了 `-o ro,noload`，**跳过 journal 回放**，看到的是最后一个 checkpoint。
+   **得**：改用 `mount -o loop`（rw）回放 journal；Guest 侧在 md5 后再 `sync`。
+   **反证**：用串口直接交互探测 Guest，返回 `up 1 min`、心跳 #44、`testfile.copy` 128 MiB、日志 3552 字节——**Guest 全程健康**，之前的"冻结"是观测假象。
+
+5. **得（决定性线索）**：pcap 分析显示迁移后 +8..+18 s 仍以 **~1400 包/秒**传输，证明**迁移后 USB 数据面正常工作**，从而把故障面锁定在"串口/观测"而非 USB 通路。
+
+**仍未消除的 Guest 可见扰动（如实记录）**：迁移后 Guest 串口控制台会**重印登录横幅**（目标端重建串口设备导致 tty 重置）。这是 CH 串口设备的行为，与 USB 通路无关；若要"完全零感知"，需在 CH 侧保留串口设备实例。
+
+**产物**
+- `guest/usb-migration-demo.sh`：一键端到端 demo（迁移 + 权威校验）
+- `guest/fifo-capture.py`：FIFO 常驻捕获（避免目标端 `File::create` 截断迁移前日志）
+- `guest/testfile.md5`：期望校验值
+- 提交：见 D7 之后的 commit
+
+---
 
 ---

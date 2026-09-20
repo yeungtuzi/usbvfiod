@@ -132,6 +132,77 @@ EOF
 mkdir -p rootfs/etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/demo-info.service rootfs/etc/systemd/system/multi-user.target.wants/demo-info.service
 
+# Live-migration demo: copy a large file from the passthrough USB stick to the
+# guest disk, so the copy spans the migration.
+#
+# Everything is written to /root/demo.log first; the serial console is only a
+# best-effort mirror. A live migration re-creates the destination's serial
+# device, which resets the guest tty - writing progress exclusively to
+# /dev/ttyS0 makes the copy appear to stop even though it is still running.
+cat > rootfs/usr/local/bin/demo-copy.sh <<'EOF'
+#!/bin/sh
+LOG=/root/demo.log
+: > "$LOG"
+say() {
+  echo "$*" >> "$LOG"
+  echo "$*" > /dev/ttyS0 2>/dev/null || true
+}
+say "DEMO-COPY: waiting for the USB device"
+for _ in $(seq 1 120); do [ -b /dev/sda1 ] && break; sleep 1; done
+if [ ! -b /dev/sda1 ]; then say "DEMO-COPY: ERROR no /dev/sda1"; exit 1; fi
+mkdir -p /mnt/usb
+if ! mount -t exfat -o ro /dev/sda1 /mnt/usb; then
+  say "DEMO-COPY: ERROR mount failed"; exit 1
+fi
+say "DEMO-COPY: SOURCE_READY $(date +%s.%N)"
+ls -l /mnt/usb/testfile.bin >> "$LOG" 2>&1 || { say "DEMO-COPY: ERROR no testfile"; exit 1; }
+say "DEMO-COPY: COPY_START $(date +%s.%N)"
+dd if=/mnt/usb/testfile.bin of=/root/testfile.copy bs=1M status=progress 2>> "$LOG"
+say "DEMO-COPY: COPY_DONE $(date +%s.%N) rc=$?"
+sync
+md5sum /mnt/usb/testfile.bin /root/testfile.copy >> "$LOG" 2>&1
+sync
+say "DEMO-COPY: MD5_DONE"
+EOF
+chmod +x rootfs/usr/local/bin/demo-copy.sh
+cat > rootfs/etc/systemd/system/demo-copy.service <<'EOF'
+[Unit]
+Description=USB live-migration copy demo
+After=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/demo-copy.sh
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/demo-copy.service rootfs/etc/systemd/system/multi-user.target.wants/demo-copy.service
+
+# Heartbeat: proves whether the guest is actually executing after the migration.
+# Without it a stalled copy is indistinguishable from a frozen VM.
+cat > rootfs/usr/local/bin/demo-heartbeat.sh <<'EOF'
+#!/bin/sh
+LOG=/root/demo.log
+i=0
+while true; do
+  i=$((i + 1))
+  MSG="DEMO-HEARTBEAT $i $(date +%s) uptime=$(cut -d' ' -f1 /proc/uptime)"
+  echo "$MSG" >> "$LOG"
+  echo "$MSG" > /dev/ttyS0 2>/dev/null || true
+  sleep 2
+done
+EOF
+chmod +x rootfs/usr/local/bin/demo-heartbeat.sh
+cat > rootfs/etc/systemd/system/demo-heartbeat.service <<'EOF'
+[Unit]
+Description=Demo heartbeat
+After=multi-user.target
+[Service]
+ExecStart=/usr/local/bin/demo-heartbeat.sh
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -sf /etc/systemd/system/demo-heartbeat.service rootfs/etc/systemd/system/multi-user.target.wants/demo-heartbeat.service
+
 # keep the live-only casper unit from failing the boot
 rm -f rootfs/etc/systemd/system/multi-user.target.wants/casper-md5check.service 2>/dev/null || true
 
