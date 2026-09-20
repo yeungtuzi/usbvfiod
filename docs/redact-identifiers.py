@@ -40,6 +40,14 @@ KNOWN_BAD_SHA256 = {
         "a personal name",
     "3830e8c40db6ae4143881b9028ab676b5cb17f6fcfc97fb4710e73874d2812f5":
         "a personal account name",
+    "024acf1c513884e8f8f5ee6966b3e81c3cc6ed61734826a21b0f4c3711a04ac4":
+        "a personal name, lower case",
+    "55bb0d0b2489601db0397f363f29e8a7a265e0ab0d0d38cb5df47202e66e4686":
+        "a personal name, hyphenated",
+    "2721a1000324033b3f6d9dfcea6127962677b7e513a111720e00c678753251e4":
+        "a personal name, run together",
+    "579dac7228d7ead91ee9fb0b35401b0d6730cbeb5eee4ef96546a2804c672f42":
+        "a personal name, first token",
 }
 
 # Generic categories that should never appear in a double-blind artefact.
@@ -81,11 +89,21 @@ def main() -> int:
             text = open(path, errors="replace").read()
         except OSError:
             continue
-        for token in re.split(r"[\s\"'`()\[\]{}<>,;]+", text):
-            digest = hashlib.sha256(token.encode()).hexdigest()
-            if digest in KNOWN_BAD_SHA256:
-                print(f"{path}: known-bad token ({KNOWN_BAD_SHA256[digest]})")
-                hits += 1
+        # Match 1-, 2- and 3-token windows under both space and hyphen joins:
+        # a personal name can appear as "Ziyi Fu", "ziyi-fu" or "ziyifu225", and
+        # an earlier tokeniser that only split on whitespace missed the
+        # hyphenated file name while reporting OK.
+        words = re.split(r"[\s\"'`()\[\]{}<>,;.]+", text.replace("-", " ").replace("_", " "))
+        words = [w for w in words if w]
+        for n in (1, 2, 3):
+            for i in range(len(words) - n + 1):
+                window = words[i:i + n]
+                for sep in (" ", "-", ""):
+                    cand = sep.join(window)
+                    digest = hashlib.sha256(cand.encode()).hexdigest()
+                    if digest in KNOWN_BAD_SHA256:
+                        print(f"{path}: known-bad token ({KNOWN_BAD_SHA256[digest]})")
+                        hits += 1
         for lit in extra:
             if lit and lit in text:
                 print(f"{path}: matches a supplied pattern")

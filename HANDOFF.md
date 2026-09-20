@@ -46,7 +46,7 @@
 | `usbvfiod-architecture-report.md` | 中文，约 428 行 | 架构与 Q1/Q2/Q3 分析报告 |
 | `usb-vfiod-live-migration_cn.md` / `_en.md` | **v1.0，各 501 行** | **最终版计划**：只有最终需求（R1–R20）与实现计划，无来源对比 |
 | `suspend-resume-plan_cn.md` / `_en.md` | v2.1，各 522 行 | 合并版计划，**含两份来源的对比与合并过程**（历史参考，勿删） |
-| `ziyi-fu-discuss-for-da.md` | 8.7 KB | 归档的迁移论文提案（需求来源之一） |
+| `migration-paper-proposal.md` | 8.7 KB | 归档的迁移论文提案（需求来源之一） |
 
 ### Git 状态（迁移前快照）
 - HEAD：`4d2c5af768434e3889af6c50125e4df07918eff7`（2026-09-15，"Merge pull request #314 …"）

@@ -214,7 +214,7 @@ Libvirt does permit a domain with a USB host device to migrate
 \cite{libvirtmigrationsrc}: its source comment calls the USB case ``migrated''
 in quotation marks, and QEMU's \code{usb-host} realises that by detaching the
 device on the source and re-attaching it on the destination. The host-side
-session is not preserved---the the host-side session is not preserved: the guest sees the device
+session is not preserved: the guest sees the device
 disappear and come back, which is exactly the naive alternative we measure in
 Section~\ref{sec:baseline}. USB redirection sends the traffic to a remote client
 \cite{usbredir} rather than preserving a host-side session.
@@ -639,7 +639,7 @@ harness records it. Each run shows two interrupt-line installations (the source
 registering at start-up, the destination taking over during the migration) and
 exactly \KickMin{} re-raised interrupts on the new line, and one
 stale teardown that the
-server refused (between \StaleMin{} and \StaleMax{} per run, logged as
+server refused (exactly \StaleMin{} per run, logged as
 \code{ignoring IRQ disable from stale vfio-user client}). Without that refusal
 the destination would have been left with a dummy interrupt line, which is the
 failure mode we measured before the guard existed. The counts come from the
@@ -1034,7 +1034,7 @@ against them assuming the two clocks agree, and that assumption is not verified:
 the heartbeat pairs check that the guest clock runs at the same rate, not that
 its offset is zero. The exposure in the data is small---the nearest enumeration
 or reset event is at least 6.9\,s from the cutoff in every migrating run, and the
-span margin is about 7\,s---but the offset itself is untested. The destination of
+span margin is at least \SpanMarginMin\,s in the acceptance arm---but the offset itself is untested. The destination of
 the copy was a file on the host-backed guest disk, so host page-cache writeback
 is in the loop.
 

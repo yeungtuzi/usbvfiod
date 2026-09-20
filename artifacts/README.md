@@ -30,6 +30,24 @@ The batches and what each one is for:
 | naive baseline | `/root/usb-replug`: 3 hotplug detach/re-attach runs | the comparison to the naive alternative |
 | accidental trigger | `/root/usb-runs-accidental-trigger` | a campaign whose progress trigger read a stale output file; contains the clearest single lost-interrupt stall (`kickoff-3`) |
 
+Regenerating the paper's numbers from an attachment: the archived batch
+directories under `artifacts/` are exactly what `paper/update-results.py --batch`
+expects, so copy them next to the checkout and point the Makefile at them.
+
+```console
+$ cp -r artifacts/campaign-B-acceptance /tmp/cb   # acceptance/control/release/kick-off
+$ cp -r artifacts/injection-round3      /tmp/inj
+$ cp -r artifacts/replug-baseline       /tmp/rp
+$ cd paper
+$ make data RUNROOT=/tmp/cb INJECT=/tmp/inj REPLUG=/tmp/rp
+```
+
+`make data` is phony and always regenerates `data/results.tex` (and
+`data/runs.dat`); the exposure macros come from
+`data/handover-exposure.txt`, which the same command can rebuild with
+`guest/analyze-handover-exposure.py`. A missing batch does not fail the build: the
+affected macros become `?` and the script warns.
+
 The data is not committed to git (a single run's pcap is ~130 MB). Only this
 file and `.gitignore` are tracked; the rest is delivered as an attachment.
 

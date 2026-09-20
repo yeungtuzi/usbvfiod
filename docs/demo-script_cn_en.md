@@ -256,8 +256,8 @@ enumerations after migration : 0 (expected: 0 = no re-enumeration at/after the m
 > EN: Cross-host would require explicitly transferring device state (a vfio-user device-state region) or providing an equivalent device on the target host. We only did a feasibility analysis; it is out of scope for this demo.
 
 **Q6：这个演示能重复吗？**
-> 中：能。修复后连续 20 次全部通过（另有不迁移对照、release 构建臂与注入实验，见 `docs/DEVLOG_cn.md` D14）；`./usb-migration-demo.sh` 一条命令即可重跑并打印判定表。
-> EN: Yes. After the fix we ran it 20 times in a row with 20 passes (plus a no-migration control, a release-build arm, a kick-disabled negative control, a naive detach/re-attach baseline and a fault-injection suite; see `docs/DEVLOG_cn.md` D14). `./usb-migration-demo.sh` reruns it and prints the verdict table.
+> 中：能。修复后连续 20 次全部通过（另有不迁移对照、release 构建臂与注入实验，见 `docs/DEVLOG_cn.md` D15）；`./usb-migration-demo.sh` 一条命令即可重跑并打印判定表。
+> EN: Yes. After the fix we ran it 20 times in a row with 20 passes (plus a no-migration control, a release-build arm, a kick-disabled negative control, a naive detach/re-attach baseline and a fault-injection suite; see `docs/DEVLOG_cn.md` D15). `./usb-migration-demo.sh` reruns it and prints the verdict table.
 
 ---
 

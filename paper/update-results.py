@@ -287,8 +287,8 @@ def main() -> int:
         f"\\newcommand{{\\CopyMin}}{{{debug.lo_of('copy_s', '{:.1f}')}}}",
         f"\\newcommand{{\\CopyMedian}}{{{debug.med('copy_s')}}}",
         f"\\newcommand{{\\CopyMax}}{{{debug.hi('copy_s', '{:.1f}')}}}",
-        f"\\newcommand{{\\CILow}}{{{lo:.2f}}}",
-        f"\\newcommand{{\\CIHigh}}{{{hi:.2f}}}",
+        f"\\newcommand{{\\CILow}}{{{f'{lo:.2f}' if n else '?'}}}",
+        f"\\newcommand{{\\CIHigh}}{{{f'{hi:.2f}' if n else '?'}}}",
         f"\\newcommand{{\\FailUpper}}{{{f'{1 - 0.05 ** (1 / n):.2f}' if (n and k == n) else 'n/a'}}}",
         f"\\newcommand{{\\PassLowerOneSided}}{{{f'{0.05 ** (1 / n):.2f}' if (n and k == n) else 'n/a'}}}",
         f"\\newcommand{{\\KickMin}}{{{min(ks) if ks else '?'}}}",
@@ -337,8 +337,11 @@ def main() -> int:
     # written down here rather than in the prose so the comparison against the
     # current acceptance arm is recomputed whenever n changes.
     pre_pass, pre_fail = 4, 1
-    p = fisher_exact(debug.k, debug.n - debug.k, pre_pass, pre_fail)
-    L.append(f"\\newcommand{{\\FisherPreFix}}{{{p:.2f}}}")
+    if debug.n:
+        p = fisher_exact(debug.k, debug.n - debug.k, pre_pass, pre_fail)
+        L.append(f"\\newcommand{{\\FisherPreFix}}{{{p:.2f}}}")
+    else:
+        L.append("\\newcommand{\\FisherPreFix}{?}")
 
     # ---- power, so the Threats section can quote a real analysis ----
     if debug.n and kickoff.n:

@@ -23,12 +23,14 @@ $(TARGET).pdf: $(TARGET).tex $(wildcard figures/*.tex) $(wildcard data/*.dat) \
                data/results.tex
 	$(LATEXMK) -pdf -interaction=nonstopmode -halt-on-error $(TARGET).tex
 
-data/results.tex data/runs.dat: update-results.py
+# `data` is phony and always regenerates: the inputs live outside the repository
+# (the batch dirs), so a file-timestamp prerequisite on update-results.py alone
+# made `make data` a silent no-op after a new batch.
+.PHONY: data
+data:
 	python3 update-results.py --batch "$(RUNROOT)" \
 	  --exposure data/handover-exposure.txt \
 	  --inject "$(INJECT)" --replug "$(REPLUG)" --out data/results.tex
-
-data: data/results.tex
 
 clean:
 	$(LATEXMK) -c $(TARGET).tex
