@@ -23,10 +23,10 @@
   % annotations
   \draw[decorate, decoration={brace, amplitude=3pt, mirror}, thick, red!70]
         ([yshift=-1mm]dev.south west) -- ([yshift=-1mm]uvf.south east)
-        node[midway, below=3pt, font=\tiny, align=center, red!70]
-        {device session held\\for the whole migration};
+        node[midway, below=4pt, font=\scriptsize, align=center, red!70]
+        {device session held for the whole migration};
   \draw[decorate, decoration={brace, amplitude=3pt}, thick, teal!70]
         ([yshift=1mm]ch.north west) -- ([yshift=1mm]g.north east)
-        node[midway, above=3pt, font=\tiny, align=center, teal!70]
-        {guest RAM mapped by both VMMs as the same memfd};
+        node[midway, above=4pt, font=\scriptsize, align=center, teal!70]
+        {both VMMs map the same guest memory};
 \end{tikzpicture}

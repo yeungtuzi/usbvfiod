@@ -219,6 +219,22 @@ Bulk-Only Transport protocol \cite{usbbot}, which the kernel's
 is the most common passthrough workload and because a bulk transfer makes the
 consequences of a lost completion immediately visible as an I/O error.
 
+Fig.~\ref{fig:arch} summarises the resulting architecture. The physical device
+is owned by a host process for the entire lifetime of the VM, including the
+migration; the VMM is only a client of that process, and the guest sees an
+ordinary controller.
+
+\begin{figure*}[t]
+\centering
+\input{figures/arch.tex}
+\caption{System architecture. \code{usbvfiod} owns the physical USB device and
+emulates an xHCI controller; the VMM reaches it over vfio-user. During a
+same-host migration the server process is never restarted, so the device
+session and the controller state survive, and both VMMs map the same guest
+memory.}
+\label{fig:arch}
+\end{figure*}
+
 %=====================================================================
 \section{Problem Analysis}
 \label{sec:problem}
@@ -528,7 +544,7 @@ Fig.~\ref{fig:copy} shows the guest's copy progress for one run together with
 the migration instant. The copy is visibly interrupted in the sense that the
 curve is not perfectly smooth, but it continues across the migration and
 finishes with $rc=0$; the guest never restarts the transfer. The final
-throughput in this run was $5.7$\,MiB/s, consistent with the stick's USB~2.0
+throughput in this run was $5.7$\,MB/s ($5.4$\,MiB/s), consistent with the stick's USB~2.0
 read performance measured outside the migration.
 
 \begin{figure}[t]
