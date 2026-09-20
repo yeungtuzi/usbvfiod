@@ -22,6 +22,8 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
 RUNROOT="${RUNROOT:-/root/usb-runs}"
+REPLUG_ROOT="${REPLUG_ROOT:-/root/usb-replug}"
+INJECT_ROOT="${INJECT_ROOT:-/root/usb-inject}"
 export CARGO_HOME="${CARGO_HOME:-/root/lvllm/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-/root/lvllm/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 
@@ -61,20 +63,20 @@ if [ "$do_e" = 1 ]; then
   echo; echo "########## PHASE E: 3 naive detach/re-attach baseline runs ##########"
   for i in 1 2 3; do
     "$DIR/stop-demo.sh" >/dev/null 2>&1
-    RUN="/root/usb-replug/$i" timeout 500 "$DIR/replug-baseline.sh" > "/root/usb-replug-$i.log" 2>&1
+    RUN="$REPLUG_ROOT/$i" timeout 500 "$DIR/replug-baseline.sh" > "$REPLUG_ROOT-$i.log" 2>&1
     echo "  baseline run $i rc=$?"
   done
-  python3 "$DIR/summarize-replug.py" /root/usb-replug > /root/usb-replug/replug.csv 2>&1
-  cat /root/usb-replug/replug.csv
+  python3 "$DIR/summarize-replug.py" "$REPLUG_ROOT" > $REPLUG_ROOT/replug.csv 2>&1
+  cat $REPLUG_ROOT/replug.csv
 fi
 
 if [ "$do_f" = 1 ]; then
   echo; echo "########## PHASE F: fault-injection suite ##########"
-  RUNROOT=/root/usb-inject USBVF="$REPO/target/debug/usbvfiod" \
+  RUNROOT="$INJECT_ROOT" USBVF="$REPO/target/debug/usbvfiod" \
     "$DIR/injection-suite.sh" 5
 fi
 
 echo; echo "########## CAMPAIGN B ($phase) DONE ##########"
-for f in "$RUNROOT"/results-*.csv /root/usb-inject/results-*.csv; do
+for f in "$RUNROOT"/results-*.csv "$INJECT_ROOT"/results-*.csv; do
   [ -f "$f" ] && { echo "--- $f"; awk -F, 'NR>1 && $10=="PASS"{p++} NR>1{n++} END{printf "  %d/%d PASS\n", p+0, n+0}' "$f"; }
 done

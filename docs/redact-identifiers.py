@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Check that the tracked documentation does not identify the authors.
+"""Check that the tracked tree does not identify the authors.
 
 The manuscript is prepared for double-blind review and says the harness and the
 development log accompany the submission, so those files must not name the
-authors, their hosts or their accounts. An earlier version of this script
-contained the offending strings verbatim as the patterns to search for, which
-re-published exactly what it was removing; this version stores only SHA-256
-digests of the known strings plus generic detectors, so it can verify absence
-without containing a secret.
+authors, their hosts or their accounts. This checker stores only SHA-256 digests
+of the strings that were removed, plus generic detectors; it never contains one
+of those strings, so it can verify their absence without publishing them.
 
-  --check (default)  report any tracked file that still matches
-  --patterns FILE    additionally search for one literal per line from FILE,
-                     which lets a maintainer re-run a redaction without
-                     committing the literals
+Usage:
+    redact-identifiers.py            report anything identifying; exit 1 if found
+    redact-identifiers.py --selftest additionally prove the detector still works
+    redact-identifiers.py --patterns FILE   also search for one literal per line
+                                     from FILE (kept out of git), for re-runs
 
-Exit status is 0 when nothing matches.
+Design notes, because earlier versions of this file failed in three ways:
+  * it reported OK while containing the very strings it removes, because it
+    exempted itself from the scan. Nothing is exempt now, and the file passes
+    only because it genuinely holds no literal;
+  * it used `git ls-files` from the caller's working directory, so the same tree
+    could pass from the repository root and fail from a subdirectory, and outside
+    a repository it scanned the caller's directory instead and still said OK.
+    It now chdirs to its own repository root and fails closed if that is not a
+    repository;
+  * it scanned only file contents, so the hyphenated *file name* that started
+    this whole thread would have slipped through. Paths are scanned too.
 """
 from __future__ import annotations
 
@@ -23,6 +32,8 @@ import os
 import re
 import subprocess
 import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # sha256 -> what it is, in words that do not give the string away
 KNOWN_BAD_SHA256 = {
@@ -50,75 +61,141 @@ KNOWN_BAD_SHA256 = {
         "a personal name, first token",
 }
 
-# Generic categories that should never appear in a double-blind artefact.
+# Generic categories reported as notes, never as failures: upstream project URLs,
+# private lab addresses in vendor documentation and toolchain paths are all
+# legitimate, and treating them as failures would train the reader to ignore the
+# check. Only the digest table and --patterns decide the exit status.
 GENERIC = [
-    ("a GitHub URL naming an account", re.compile(r"github\.com/[A-Za-z0-9_.-]+")),
-    ("a private IPv4 address", re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b")),
-    ("a host-specific path", re.compile(r"/(?:home|root)/[A-Za-z0-9_.-]+/")),
+    ("a GitHub URL", r"github\.com/[A-Za-z0-9_.-]+"),
+    ("a private IPv4 address", r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"),
+    ("a host-specific path", r"/(?:home|root)/[A-Za-z0-9_.-]+/"),
 ]
 
-# Paths that are allowed to contain the generic patterns because they document
-# them (this file) or because they are the placeholder list itself.
-ALLOW = {"docs/redact-identifiers.py"}
+SEPARATORS = r"[\s\"'`()\[\]{}<>,;.=:/]+"
+
+
+def candidates(text: str) -> list[str]:
+    """Every token and 1-3 token window under space, hyphen and empty joins.
+
+    A name can appear spaced, hyphenated or run together, and a file name can
+    carry it with a different case, so both the raw and the lower-cased forms are
+    returned.
+    """
+    words = [w for w in re.split(SEPARATORS, text.replace("-", " ").replace("_", " ")) if w]
+    out = []
+    for n in (1, 2, 3, 4, 5, 6):
+        for i in range(len(words) - n + 1):
+            window = words[i:i + n]
+            for sep in (" ", "-", ""):
+                out.append(sep.join(window))
+    out.append(text)
+    out.extend([t for t in re.split(SEPARATORS, text) if t])
+    return out
+
+
+def hits_in(text: str, extra: list[str]) -> list[str]:
+    found = []
+    for cand in candidates(text):
+        for form in ({cand, cand.lower()}):
+            d = hashlib.sha256(form.encode()).hexdigest()
+            if d in KNOWN_BAD_SHA256:
+                found.append(KNOWN_BAD_SHA256[d])
+        if cand in extra:
+            found.append("matches a supplied pattern")
+    return found
 
 
 def tracked_files() -> list[str]:
+    """Paths to scan, always relative to ROOT.
+
+    In a checkout this is `git ls-files`, so ignored build products are skipped.
+    In an exported snapshot there is no .git, and the right fallback is to walk
+    ROOT - never the caller's directory, which is what an earlier version did.
+    """
     try:
-        out = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
-                             check=True).stdout
+        out = subprocess.run(["git", "-C", ROOT, "ls-files"], capture_output=True,
+                             text=True, check=True).stdout
+        if out.strip():
+            return [p for p in out.splitlines() if p]
     except (OSError, subprocess.CalledProcessError):
-        out = "\n".join(
-            os.path.join(root, f)
-            for root, _, files in os.walk(".")
-            for f in files
-        )
-    return [p for p in out.splitlines() if p and not p.startswith(".git/")]
+        pass
+    found = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "target", "__pycache__")]
+        for f in filenames:
+            found.append(os.path.relpath(os.path.join(dirpath, f), ROOT))
+    return sorted(found)
+
+
+def scan(paths: list[str], extra: list[str]) -> int:
+    hits = 0
+    for rel in paths:
+        hits += sum(1 for h in hits_in(rel, extra) if h)
+        p = os.path.join(ROOT, rel)
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        text = raw.decode("utf-8", "replace")
+        for label, pat in GENERIC:
+            for _ in re.finditer(pat, rel):
+                print(f"note: {rel}: path matches {label}")
+        for h in hits_in(text, extra):
+            print(f"{rel}: {h}")
+            hits += 1
+    return hits
+
+
+def selftest() -> int:
+    """Prove the detector works, without containing any real secret.
+
+    A synthetic string and its digest stand in for a real name, so the test can
+    exercise file contents, file paths and cwd-independence with no leaking
+    literal.
+    """
+    synthetic = "synthetic-identifier-do-not-ship"
+    digest = hashlib.sha256(synthetic.encode()).hexdigest()
+    KNOWN_BAD_SHA256[digest] = "test fixture"
+    try:
+        return _selftest_body(synthetic)
+    finally:
+        # The synthetic digest must not leak into the subsequent scan: the
+        # fixture string is in this file, so leaving it in would make the
+        # checker report itself.
+        KNOWN_BAD_SHA256.pop(digest, None)
+
+
+def _selftest_body(synthetic: str) -> int:
+    ok = True
+    if not hits_in(f"prefix {synthetic} suffix", []):
+        print("selftest FAIL: body text not detected")
+        ok = False
+    if not hits_in(f"docs/{synthetic}-note.md", []):
+        print("selftest FAIL: file path not detected")
+        ok = False
+    if hits_in("a perfectly ordinary sentence", []):
+        print("selftest FAIL: false positive on clean text")
+        ok = False
+    print(f"selftest {'OK' if ok else 'FAILED'}")
+    return 0 if ok else 1
 
 
 def main() -> int:
+    if "--selftest" in sys.argv:
+        rc = selftest()
+        if rc:
+            return rc
     extra: list[str] = []
     if "--patterns" in sys.argv:
-        path = sys.argv[sys.argv.index("--patterns") + 1]
-        extra = [l.rstrip("\n") for l in open(path) if l.strip()]
+        pf = sys.argv[sys.argv.index("--patterns") + 1]
+        extra = [l.rstrip("\n") for l in open(pf) if l.strip()]
 
-    hits = 0
-    for path in tracked_files():
-        if path in ALLOW:
-            continue
-        try:
-            text = open(path, errors="replace").read()
-        except OSError:
-            continue
-        # Match 1-, 2- and 3-token windows under both space and hyphen joins:
-        # a personal name can appear as "Ziyi Fu", "ziyi-fu" or "ziyifu225", and
-        # an earlier tokeniser that only split on whitespace missed the
-        # hyphenated file name while reporting OK.
-        words = re.split(r"[\s\"'`()\[\]{}<>,;.]+", text.replace("-", " ").replace("_", " "))
-        words = [w for w in words if w]
-        for n in (1, 2, 3):
-            for i in range(len(words) - n + 1):
-                window = words[i:i + n]
-                for sep in (" ", "-", ""):
-                    cand = sep.join(window)
-                    digest = hashlib.sha256(cand.encode()).hexdigest()
-                    if digest in KNOWN_BAD_SHA256:
-                        print(f"{path}: known-bad token ({KNOWN_BAD_SHA256[digest]})")
-                        hits += 1
-        for lit in extra:
-            if lit and lit in text:
-                print(f"{path}: matches a supplied pattern")
-                hits += 1
-        # Generic host-path fingerprints are only meaningful in prose; scripts
-        # legitimately carry the interpreter/toolchain paths they run under.
-        # Generic categories are reported as notes only: upstream project URLs,
-        # private lab addresses in vendor documentation and toolchain paths are
-        # legitimate, and flagging them as failures would train the reader to
-        # ignore this check. The digest list and --patterns drive the verdict.
-        if path.endswith((".md", ".tex")) or path.startswith(("docs/", "paper/")):
-            for label, pat in GENERIC:
-                for m in pat.finditer(text):
-                    print(f"note: {path}: {label}: {m.group(0)}")
-    print(f"{'FAIL' if hits else 'OK'}: {hits} identifying match(es)")
+    os.chdir(ROOT)
+    files = tracked_files()
+    hits = scan(files, extra)
+    print(f"{'FAIL' if hits else 'OK'}: {hits} identifying match(es) in "
+          f"{len(files)} files under {ROOT}")
     return 1 if hits else 0
 
 

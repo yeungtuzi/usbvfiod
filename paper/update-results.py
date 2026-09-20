@@ -516,9 +516,9 @@ def main() -> int:
     L += ["\\newcommand{\\ArmsTableBody}{%", "\\midrule",
           row("Debug, migration", debug, "---"),
           row("Release, migration", release, "---"),
-          row("Debug, no migration", control, "n/a"),
+          row("Debug, no migration", control, "checksum only"),
           row("Debug, kick disabled", kickoff,
-              f"$p=\\FisherKick$ vs.\\ debug"),
+              f"$p=\\FisherKick$"),
           "\\bottomrule", "}", ""]
 
     # ---- injection table body ----
