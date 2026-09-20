@@ -31,8 +31,8 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
 - `docs/DEVLOG_cn.md`（开发日志，含每一处得失与回退）、`docs/review_report_cn.md`（前两轮评审与处理）
 - `guest/` 下的测试与测量脚本：`acceptance-batch.sh`、`verdict.py`、`summarize-batch.py`、
   `analyze-handover-exposure.py`、`injection-suite.sh`、`replug-baseline.sh`、`collect-artifacts.sh`
-- 原始数据：`/run/usb-batch/`（每个 run 一个目录，含 `usbvfiod.log` 全量 trace、`guest-demo.log`、
-  两端 CH 日志、`migration.epoch`）与 `/run/usb-batch/results-*.csv`
+- 原始数据：`/root/usb-runs/`（每个 run 一个目录，含 `usbvfiod.log` 全量 trace、`guest-demo.log`、
+  两端 CH 日志、`migration.epoch`）与 `/root/usb-runs/results-*.csv`
 
 你的任务：
 
@@ -92,8 +92,8 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
   Fisher 精确检验）
 - `guest/analyze-handover-exposure.py`（交接窗口暴露度测量）
 - `guest/summarize-replug.py`（朴素基线判定）
-- 原始数据：`/run/usb-batch/results-*.csv`、`/run/usb-batch/<tag>-*/usbvfiod.log`、
-  `/run/usb-batch/<tag>-*/guest-demo.log`、`/run/usb-batch/<tag>-*/migration.epoch`
+- 原始数据：`/root/usb-runs/results-*.csv`、`/root/usb-runs/<tag>-*/usbvfiod.log`、
+  `/root/usb-runs/<tag>-*/guest-demo.log`、`/root/usb-runs/<tag>-*/migration.epoch`
 
 你的任务：
 
@@ -108,7 +108,7 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
    把"事件已入环但中断丢失"与"事件未入环"混同）？用已有日志给出定量的边界估计。
 4. **审问负对照臂的混杂**：`debug`/`control`/`release`/`kickoff` 四个臂是**成块顺序**执行的，
    不是随机化交错。请评估这对手头结论的威胁有多大，并说明在**不重跑**的前提下能从现有数据里
-   做什么诊断（例如按时间分段、与宿主负载采样 `/run/usb-batch` 或 `artifacts/host-load.log` 关联）。
+   做什么诊断（例如按时间分段、与宿主负载采样 `/root/usb-runs` 或 `artifacts/host-load.log` 关联）。
 5. **审问注入套件**：`guest/injection-suite.sh` 的四臂预期（baseline PASS / window PASS /
    window-loss FAIL / guard-off FAIL）中，哪一条的推理是错的或不可证的？为什么？
 6. **样本量与效力**：对"kick 关闭导致失败"这一比较，按当前样本算精确检验的效力（power）；

@@ -1,8 +1,9 @@
 # USB 存储直通 Live Migration 演示脚本（中英双语）
 # USB Passthrough Live Migration — Demo Script (Bilingual)
 
-> 适用版本 / Applies to：usbvfiod `3fea3d9` + Cloud Hypervisor `v53.0-520` + 一键脚本 `guest/usb-migration-demo.sh`
-> 实测结论 / Measured result：**10/10 通过**，停机 **4–18 ms**，复制跨越迁移，md5 完全一致，迁移后**零重枚举**。
+> 适用版本 / Applies to：usbvfiod（分支 `main`，含多客户端后端与两个交接修复）+ Cloud Hypervisor `v53.0-520` + 一键脚本 `guest/usb-migration-demo.sh`
+> 实测结论 / Measured result：**20/20 通过**，停机 **4–21 ms**（中位 6 ms），复制跨越迁移，md5 完全一致，迁移后**零重枚举、零复位、零 I/O 错误**。
+> 对照与注入 / Controls and injection：不迁移 8/8；release 构建 8/8（复制快约 4.5 倍）；关闭踢中断 7/8；朴素热拔插基线 0/3；故障注入「关闭归属守卫」0/5、「5 s 窗口关闭踢中断」0/3。详见 `paper/main.pdf` 与 `docs/DEVLOG_cn.md` D14。
 
 ---
 
@@ -216,16 +217,16 @@ enumerations >30s    : 0 (expected: 0 = no re-enumeration after boot)
 ## 3. 结论与数据 / Verdict and numbers
 
 **中**
-> 总结三句话：**第一，迁移期间 USB 数据面没有中断**——128 MB 复制完整跨越迁移；**第二，数据正确**——逐字节一致；**第三，Guest 无感知**——无重枚举、无 reset、无错误。停机时间 4–18 毫秒，远低于我们 2 秒的目标。
+> 总结三句话：**第一，迁移期间 USB 数据面没有中断**——128 MB 复制完整跨越迁移；**第二，数据正确**——逐字节一致；**第三，Guest 无感知**——无重枚举、无 reset、无错误。停机时间 4–21 毫秒，远低于我们 2 秒的目标；关闭踢中断的负对照与放大窗口的注入实验进一步证明修复是承重的（见 `paper/main.pdf`）。
 
 **EN**
-> Three takeaways: **one, the USB data path never broke** — the full 128 MB copy spans the migration; **two, the data is correct** — byte-for-byte identical; **three, the guest is undisturbed** — no re-enumeration, no reset, no errors. Downtime was 4–18 ms, far below our 2-second target.
+> Three takeaways: **one, the USB data path never broke** — the full 128 MB copy spans the migration; **two, the data is correct** — byte-for-byte identical; **three, the guest is undisturbed** — no re-enumeration, no reset, no errors. Downtime was 4–21 ms, far below our 2-second target.
 
-| 指标 / Metric | 目标 / Target | 实测 / Measured（10 次 / runs） |
+| 指标 / Metric | 目标 / Target | 实测 / Measured（20 次 / runs） |
 |---|---|---|
-| 停机时间 / downtime | ≤ 2000 ms | **4–18 ms** |
-| 复制跨越迁移 / copy spans migration | 必须 / required | **10/10 YES** |
-| md5 | 与源一致 / identical | **10/10 MATCH** |
+| 停机时间 / downtime | ≤ 2000 ms | **4–21 ms**（中位 6） |
+| 复制跨越迁移 / copy spans migration | 必须 / required | **20/20 YES**（含切换完成时刻） |
+| md5 | 与源一致 / identical | **20/20 MATCH** |
 | 迁移后重枚举 / re-enumeration after migration | 0 | **0** |
 | reset / I/O 错误 / reset / I/O errors | 0 | **0** |
 | Guest 存活 / guest alive | 是 / yes | 心跳持续 + `rc=0` |
@@ -255,7 +256,7 @@ enumerations >30s    : 0 (expected: 0 = no re-enumeration after boot)
 > EN: Cross-host would require explicitly transferring device state (a vfio-user device-state region) or providing an equivalent device on the target host. We only did a feasibility analysis; it is out of scope for this demo.
 
 **Q6：这个演示能重复吗？**
-> 中：能。修复后连续 10 次全部通过；`./usb-migration-demo.sh` 一条命令即可重跑并打印判定表。
+> 中：能。修复后连续 20 次全部通过（另有不迁移对照、release 构建臂与注入实验，见 `docs/DEVLOG_cn.md` D14）；`./usb-migration-demo.sh` 一条命令即可重跑并打印判定表。
 > EN: Yes. After the fix we ran it 10 times in a row with 10 passes; `./usb-migration-demo.sh` reruns it and prints the verdict table.
 
 ---
@@ -268,8 +269,8 @@ enumerations >30s    : 0 (expected: 0 = no re-enumeration after boot)
 | Guest 里没有 `/dev/sda` | exfat 模块缺失 / exfat module missing | 重新 `./build-guest.sh`（会合并 `linux-modules-extra`） |
 | 复制卡住且无报错 | 旧二进制 / stale binary | `cargo build` 后重跑（**改完源码必须重建**） |
 | 判定表显示 `guest log NOT AVAILABLE` | 镜像挂载失败 / mount failed | 确认没有残留 CH 进程占用镜像；脚本会用 rw 挂载回放 ext4 日志 |
-| 判定表 `spans migration: NO` | 迁移发生在复制之外 / migration outside copy | 增大 `COPY_LEAD_SECONDS` 或使用更大的测试文件 |
-| `MISMATCH` | 数据面真正出错 / real data-path bug | 保留 `/run/usb-demo/{guest-demo.log,usb.pcap,usbvfiod.log}` 用于分析 |
+| 判定表 `spans migration: NO` | 迁移请求或切换完成落在复制之外 / migration not inside the copy | 检查 Guest 心跳的 `copied=` 是否被正确识别；必要时调小 `COPY_TRIGGER_BYTES`（默认 16 MiB）。**不要**用固定墙钟延迟去凑——release 构建的复制比 debug 快约 4.5 倍 |
+| `MISMATCH` | 数据面真正出错 / real data-path bug | 保留 `$RUN/{guest-demo.log,usb.pcap,usbvfiod.log}` 用于分析 |
 
 ---
 

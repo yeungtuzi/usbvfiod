@@ -4,6 +4,11 @@
 > 日期：2026-09-20
 > 实测基线：Cloud Hypervisor `v53.0-520-gc24527002`、usbvfiod `4d2c5af`（v0.3.0）、`vfio_user 0.1.5`
 > 关联：R7/R9/R10/R11/R14/R16/R17；Phase 0 实验 B（`docs/phase0-exp-b-ch-vfio-user-migration_cn.md`）
+>
+> ⚠️ **本文档记录的是当时的演示方案与验收目标（N=10），下文的"实测"数字是**当时**的结果。**
+> 最终版（N=20 + 不迁移对照 + release 构建臂 + 关闭踢中断负对照 + 朴素热拔插基线 + 确定性故障注入）
+> 见 `paper/main.pdf` 与 `docs/DEVLOG_cn.md` D14；判据与触发方式也已改进（按复制进度触发、
+> 要求整个迁移落在复制窗口内）。请勿把下文的 10 次数字当作当前结论。
 
 ---
 
