@@ -46,10 +46,44 @@ $ cloud-hypervisor --api-socket /run/guest.sock \
 The guest gives root autologin on `ttyS0`; `dmesg`, `lsusb`, `mount`,
 `md5sum` are available and `usb-storage`/`uas` load.
 
+## Driving the guest
+
+`demo-guest.sh` starts/stops usbvfiod + CH and exposes the serial console as a
+UNIX socket; `guest-exec.py` sends commands to it and waits for a per-command
+sentinel, so results can be scripted instead of typed.
+
+```console
+$ ./demo-guest.sh start --device /dev/bus/usb/001/007
+$ ./guest-exec.py --sock /run/usbvfiod-demo/serial.sock \
+    --cmd 'lsblk' --cmd 'mount -t exfat -o ro /dev/sda1 /mnt/usb && ls /mnt/usb'
+$ ./demo-guest.sh stop
+```
+
 ## Verified
 
 - 2026-09-20 — boots to a root shell (kernel `5.15.0-94-generic`).
 - With usbvfiod attached via `--user-device`, the guest enumerates the virtual
   controller (`xhci_hcd 0000:00:03.0`) and `lsusb` lists both root hubs
   (`1d6b:0002` Bus 001 / `1d6b:0003` Bus 002).
-- Physical USB storage passthrough still requires a real USB stick.
+- Real hardware passthrough: a 32 GB exfat USB stick on `/dev/bus/usb/001/007`
+  is claimed by usbvfiod, appears in the guest as `/dev/sda`, and mounts:
+  `mount -t exfat -o ro /dev/sda1 /mnt/usb` → `MOUNT_OK` (29.7 GB visible).
+- A 1 GiB `testfile.bin` (md5 `0fc3e7df554fcfd9165d70586ef45bb6`) is written to
+  the stick from the guest and is the copy source for the migration demo.
+
+### exfat note
+
+The initrd only ships boot-critical modules, so the minimal rootfs had **no
+`exfat`** and the stick could not be mounted. `build-guest.sh` now fetches
+`linux-modules-extra-<kver>` and merges it (1561 → 5394 modules), which also
+brings ntfs/f2fs/btrfs and friends.
+
+## Files
+
+| file | tracked | purpose |
+|---|---|---|
+| `build-guest.sh` | yes | build `rootfs.img` + `initrd-custom.gz` from the ISO |
+| `demo-guest.sh` | yes | start/stop usbvfiod + CH, expose the serial socket |
+| `guest-exec.py` | yes | run commands in the guest over the serial socket |
+| `README.md`, `.gitignore` | yes | this file / ignore rules |
+| `casper/`, `rootfs/`, `rootfs.img`, `initrd-custom.gz`, `.cache/` | no | artifacts (multi-GB) |

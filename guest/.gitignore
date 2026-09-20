@@ -16,6 +16,9 @@ rootfs/
 # generated initramfs (rebuilt by build-guest.sh)
 initrd-custom.gz
 
+# cached downloads (linux-modules-extra .deb)
+.cache/
+
 # runtime logs / sockets
 *.log
 *.sock

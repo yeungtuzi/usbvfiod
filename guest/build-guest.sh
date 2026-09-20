@@ -24,23 +24,25 @@ set -euo pipefail
 WORK="${WORK:-$(cd "$(dirname "$0")" && pwd)}"
 ISO="${ISO:-/var/lib/vz/template/iso/ubuntu-22.04.4-live-server-amd64.iso}"
 KVER="${KVER:-5.15.0-94-generic}"
+KMOD_VER="${KMOD_VER:-5.15.0-94.104}"
+EXTRA_DEB_URL="${EXTRA_DEB_URL:-https://mirrors.tuna.tsinghua.edu.cn/ubuntu/pool/main/l/linux/linux-modules-extra-${KVER}_${KMOD_VER}_amd64.deb}"
 IMG_MB="${IMG_MB:-4096}"
 
 cd "$WORK"
 mkdir -p casper
 
-echo "[1/7] extracting casper files from ISO"
+echo "[1/8] extracting casper files from ISO"
 if [ ! -f casper/vmlinuz ] || [ ! -f casper/initrd ] || [ ! -f casper/ubuntu-server-minimal.squashfs ]; then
   7z x -y -o. "$ISO" casper/vmlinuz casper/initrd \
     casper/ubuntu-server-minimal.squashfs casper/ubuntu-server-minimal.manifest >/dev/null
 fi
 ls -lh casper/
 
-echo "[2/7] unpacking rootfs squashfs"
+echo "[2/8] unpacking rootfs squashfs"
 rm -rf rootfs
 unsquashfs -q -d rootfs casper/ubuntu-server-minimal.squashfs >/dev/null
 
-echo "[3/7] grafting kernel modules from initrd"
+echo "[3/8] grafting kernel modules from initrd"
 rm -rf /tmp/ird-graft
 unmkinitramfs casper/initrd /tmp/ird-graft >/dev/null 2>&1 || true
 SRC="/tmp/ird-graft/main/usr/lib/modules/$KVER"
@@ -49,7 +51,29 @@ mkdir -p "rootfs/usr/lib/modules"
 cp -a "$SRC" "rootfs/usr/lib/modules/"
 echo "      modules: $(find "rootfs/usr/lib/modules/$KVER" -name '*.ko' | wc -l) .ko files"
 
-echo "[4/7] rebuilding initramfs without the casper hooks"
+echo "[4/8] merging linux-modules-extra (exfat and other filesystems)"
+# The initrd only carries boot-critical modules; USB sticks are usually exfat,
+# which lives in linux-modules-extra. Fetch it once and merge it in.
+CACHE="$WORK/.cache"
+DEB="$CACHE/$(basename "$EXTRA_DEB_URL")"
+EXDIR="$CACHE/extra-extract"
+mkdir -p "$CACHE"
+if [ ! -f "$DEB" ]; then
+  curl -sSL --max-time 600 -o "$DEB" "$EXTRA_DEB_URL" || echo "WARNING: could not fetch $EXTRA_DEB_URL"
+fi
+if [ -f "$DEB" ]; then
+  rm -rf "$EXDIR"; mkdir -p "$EXDIR"
+  dpkg-deb -x "$DEB" "$EXDIR"
+  src="$EXDIR/usr/lib/modules/$KVER"
+  [ -d "$src" ] || src="$EXDIR/lib/modules/$KVER"
+  cp -a "$src/." "rootfs/usr/lib/modules/$KVER/" 2>/dev/null || true
+  depmod -b "$WORK/rootfs" "$KVER" 2>/dev/null || true
+  echo "      modules after merge: $(find "rootfs/usr/lib/modules/$KVER" -name '*.ko' | wc -l) .ko files"
+else
+  echo "      WARNING: linux-modules-extra unavailable; exfat will not mount"
+fi
+
+echo "[5/8] rebuilding initramfs without the casper hooks"
 rm -rf /tmp/ird-custom
 cp -a /tmp/ird-graft/main /tmp/ird-custom
 rm -f /tmp/ird-custom/conf/conf.d/casperize.conf \
@@ -62,7 +86,7 @@ rm -rf /tmp/ird-custom/scripts/casper \
 ( cd /tmp/ird-custom && find . -print0 | cpio --null -o -H newc --quiet | gzip -1 ) > initrd-custom.gz
 ls -lh initrd-custom.gz
 
-echo "[5/7] guest configuration"
+echo "[6/8] guest configuration"
 echo demo-guest > rootfs/etc/hostname
 mkdir -p rootfs/etc/cloud && touch rootfs/etc/cloud/cloud-init.disabled
 
@@ -111,10 +135,10 @@ ln -sf /etc/systemd/system/demo-info.service rootfs/etc/systemd/system/multi-use
 # keep the live-only casper unit from failing the boot
 rm -f rootfs/etc/systemd/system/multi-user.target.wants/casper-md5check.service 2>/dev/null || true
 
-echo "[6/7] creating ${IMG_MB}MB ext4 image"
+echo "[7/8] creating ${IMG_MB}MB ext4 image"
 rm -f rootfs.img
 truncate -s "${IMG_MB}M" rootfs.img
 mke2fs -q -t ext4 -F -d rootfs rootfs.img
 
-echo "[7/7] done"
+echo "[8/8] done"
 ls -lh rootfs.img initrd-custom.gz
