@@ -208,7 +208,8 @@ def main() -> int:
     need(kickoff.n > 0, "no kick-off arm")
 
     inj = {}
-    for tag in ("baseline", "window", "window-loss", "guard-off"):
+    for tag in ("baseline", "window", "window-loss", "winlong-on", "winlong-off",
+                "guard-off"):
         inj[tag] = Arm(tag, read_runs(os.path.join(args.inject, f"results-{tag}.csv")))
 
     replug_runs = sorted(
@@ -275,6 +276,12 @@ def main() -> int:
         L.append(f"\\newcommand{{\\FisherControl}}{{{p:.3f}}}")
     else:
         L.append("\\newcommand{\\FisherControl}{?}")
+    if debug.n and inj["guard-off"].n:
+        a = inj["guard-off"]
+        p = fisher_exact(debug.k, debug.n - debug.k, a.k, a.n - a.k)
+        L.append(f"\\newcommand{{\\FisherGuard}}{{{f'{p:.4f}' if p >= 0.0001 else '$<$0.0001'}}}")
+    else:
+        L.append("\\newcommand{\\FisherGuard}{?}")
     L.append("")
 
     # ---- hand-over exposure ----
@@ -307,7 +314,10 @@ def main() -> int:
     # ---- fault injection ----
     L.append("% ---- fault injection arms ----")
     for tag, macro in (("baseline", "InjBaseline"), ("window", "InjWindow"),
-                       ("window-loss", "InjWindowLoss"), ("guard-off", "InjGuard")):
+                       ("window-loss", "InjWindowLoss"),
+                       ("winlong-on", "InjWinLongOn"),
+                       ("winlong-off", "InjWinLongOff"),
+                       ("guard-off", "InjGuard")):
         a = inj[tag]
         if a.n:
             L += [f"\\newcommand{{\\{macro}Pass}}{{{a.k}}}",
@@ -334,17 +344,17 @@ def main() -> int:
         def mx(key: str) -> str:
             vals = [int(r[key]) for r in rp if r.get(key, "").lstrip("-").isdigit()]
             return str(max(vals)) if vals else "?"
-        done = sum(1 for r in rp if r.get("copy_done") == "True")
-        matched = sum(1 for r in rp if r.get("md5_match") == "True")
+        ok = sum(1 for r in rp if r.get("ok") == "True")
+        digest_ok = sum(1 for r in rp if r.get("md5_match") == "True")
         L += [
-            f"\\newcommand{{\\ReplugCompleted}}{{{done}}}",
-            f"\\newcommand{{\\ReplugMd5Match}}{{{matched}}}",
+            f"\\newcommand{{\\ReplugOk}}{{{ok}}}",
+            f"\\newcommand{{\\ReplugDigestMatch}}{{{digest_ok}}}",
             f"\\newcommand{{\\ReplugReenumMax}}{{{mx('reenum')}}}",
             f"\\newcommand{{\\ReplugResetsMax}}{{{mx('resets')}}}",
             f"\\newcommand{{\\ReplugIOErrMax}}{{{mx('io_errors')}}}",
         ]
     else:
-        for m in ("ReplugCompleted", "ReplugMd5Match", "ReplugReenumMax",
+        for m in ("ReplugOk", "ReplugDigestMatch", "ReplugReenumMax",
                   "ReplugResetsMax", "ReplugIOErrMax"):
             L.append(f"\\newcommand{{\\{m}}}{{?}}")
     L.append("")
@@ -355,7 +365,7 @@ def main() -> int:
         spans = "yes" if r.get("spans") == "YES" else "no"
         md5 = "match" if r.get("md5") == "MATCH" else "mismatch"
         body.append(f"{i} & {r.get('downtime_ms') or '?'} & {r.get('copy_s') or '?'} & "
-                    f"{spans} & {md5} & {r.get('late_enum') or '?'} \\\\")
+                    f"{spans} & {md5} / {r.get('late_enum') or '?'} \\\\")
     body.append("\\bottomrule")
     L += ["\\newcommand{\\ResultsTableBody}{%", *body, "}", ""]
 
@@ -387,6 +397,8 @@ def main() -> int:
           injrow("Hooks dormant", "baseline", "pass"),
           injrow("500\\,ms window, kick on", "window", "pass"),
           injrow("500\\,ms window, kick off", "window-loss", "fail"),
+          injrow("5\\,s window, kick on", "winlong-on", "pass"),
+          injrow("5\\,s window, kick off", "winlong-off", "fail"),
           injrow("Owner guard off", "guard-off", "fail"),
           "\\bottomrule", "}", ""]
 
@@ -414,7 +426,8 @@ def main() -> int:
     show("release/migration", release)
     show("control/no-migration", control)
     show("kick-off", kickoff)
-    for tag in ("baseline", "window", "window-loss", "guard-off"):
+    for tag in ("baseline", "window", "window-loss", "winlong-on", "winlong-off",
+                "guard-off"):
         show(f"inject:{tag}", inj[tag])
     print(f"  exposure runs with window>0: "
           f"{sum(1 for e, _ in rows_exp if e > 0)}/{len(rows_exp)}")

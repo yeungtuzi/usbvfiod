@@ -1,5 +1,8 @@
 /target
 result*
+# ...but the paper's generated macro file is needed to build paper/main.pdf, so
+# a fresh clone must contain it. Regenerate with paper/update-results.py.
+!paper/data/results.tex
 /.direnv
 /.pre-commit-config.yaml
 .nixos-test-history

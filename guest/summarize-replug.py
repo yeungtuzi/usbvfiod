@@ -45,23 +45,26 @@ def read_run(run: str) -> dict | None:
     if not hb or not start:
         return {"run": run, "complete": False, "reason": "no heartbeat or COPY_START"}
     t0 = float(start.group(1))
-    t_detach = t0 + LEAD
-    # interpolate the guest uptime at the detach moment
+    # Count kernel events from COPY_START onwards, not from a fixed lead after
+    # it: the detach runs 4 s into the copy but the disconnect itself can be a
+    # few hundred milliseconds either side of that estimate, and a boundary
+    # placed in between silently drops the very events we are looking for. The
+    # question being asked is "what did the guest see during the copy".
     hb.sort(key=lambda p: p[0])
     up = None
     for i in range(len(hb) - 1):
         e0, u0 = hb[i]
         e1, u1 = hb[i + 1]
-        if e0 <= t_detach <= e1 and e1 > e0:
-            up = u0 + (u1 - u0) * (t_detach - e0) / (e1 - e0)
+        if e0 <= t0 <= e1 and e1 > e0:
+            up = u0 + (u1 - u0) * (t0 - e0) / (e1 - e0)
             break
     if up is None:
-        if t_detach <= hb[0][0]:
+        if t0 <= hb[0][0]:
             up = hb[0][1]
-        elif t_detach >= hb[-1][0]:
+        elif t0 >= hb[-1][0]:
             up = hb[-1][1]
     if up is None:
-        return {"run": run, "complete": False, "reason": "detach moment outside the heartbeats"}
+        return {"run": run, "complete": False, "reason": "COPY_START outside the heartbeats"}
 
     dmesg = ""
     m = re.search(r"DEMO-COPY: DMESG_BEGIN(.*?)DEMO-COPY: DMESG_END", text, re.S)
@@ -107,7 +110,9 @@ def read_run(run: str) -> dict | None:
         "copy_done": bool(done),
         "rc": done.group(2) if done else "",
         "md5_match": bool(src and dst and src == dst),
-        "uptime_at_detach": round(up, 2),
+        # A run "succeeds" only if dd exited cleanly *and* the data is intact.
+        "ok": bool(done and done.group(2) == "0" and src and dst and src == dst),
+        "uptime_at_copy_start": round(up, 2),
         "source": source,
         "reenum": enum,
         "resets": reset,
@@ -127,8 +132,8 @@ def main() -> int:
             dirs += [os.path.join(a, d) for d in sorted(os.listdir(a)) if d.isdigit()]
         else:
             dirs.append(a)
-    cols = ["run", "complete", "copy_done", "rc", "md5_match",
-            "uptime_at_detach", "source", "reenum", "resets", "io_errors",
+    cols = ["run", "complete", "copy_done", "rc", "md5_match", "ok",
+            "uptime_at_copy_start", "source", "reenum", "resets", "io_errors",
             "dmesg_lines_after"]
     print(",".join(cols))
     rows = []

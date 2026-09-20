@@ -592,15 +592,15 @@ server log of each run, which is archived with the raw data.
 The downtime figures are also less precise than their range suggests: the median
 is \DowntimeMedian\,ms but the bootstrap 95\,\% interval for the median already
 spans \DowntimeMin--\DowntimeMax\,ms. The \TotalRuns{} values are not unimodal:
-seven runs give 4--6\,ms and the rest give 15--21\,ms, and the two groups are
-interleaved rather than time-blocked (run~5 gives 4\,ms next to run~7 at 15\,ms;
-run~17 gives 5\,ms next to run~18 at 15\,ms). A cause that alternates from one
-run to the next, rather than drifting over the session, is consistent with the
-four co-resident VMs of Section~\ref{sec:setup} stealing CPU during the
-stop-and-copy phase; it is not a property of the USB path, which is idle during
-the switchover. Copy duration varied between \CopyMin\,s and \CopyMax\,s; the
-no-migration control (\ControlRuns{} runs, median \ControlCopyMedian\,s) shows
-the same spread, so we do not attribute that variation to the migration.
+eleven runs give 4--6\,ms, eight give 15--21\,ms and one gives 10\,ms, and the
+groups alternate rather than drift (runs 1--2 give 18 and 19\,ms, runs 3--4 give
+5 and 6\,ms, runs 5--6 give 17 and 15\,ms). A cause that switches between one run
+and the next, rather than changing over the session, is consistent with the four
+co-resident VMs of Section~\ref{sec:setup} stealing CPU during the stop-and-copy
+phase; it is not a property of the USB path, which is idle during the switchover.
+Copy duration varied between \CopyMin\,s and \CopyMax\,s; the no-migration
+control (\ControlRuns{} runs, median \ControlCopyMedian\,s) shows the same
+spread, so we do not attribute that variation to the migration.
 
 \begin{table}[t]
 \centering
@@ -638,11 +638,17 @@ there is no stop-and-copy phase to measure.
 \emph{Kick disabled.} The \KickOffRuns{} runs use the acceptance build with the
 hand-over interrupt suppressed by a debug-only environment switch. This is the
 arm that decides whether the kick earns its place: if these runs failed at the
-rate predicted by the exposure measurement, the kick is load-bearing; if they
-passed, the kick would be defensive decoration. The result is in the ``pass''
-column: \KickOffPass{}/\KickOffRuns{} (Fisher exact against the acceptance arm,
-$p=\FisherKick$). Section~\ref{sec:injection} removes the remaining luck by
-making the window non-empty by construction.
+rate suggested by the exposure measurement, the kick would be clearly
+load-bearing; if they all passed, it would be defensive decoration. The outcome
+is in between---\KickOffPass/\KickOffRuns{} pass, one run stalls at a fixed byte
+count with no re-enumeration and no I/O error, which is the lost-completion
+signature---and on this sample alone the difference from the acceptance arm is
+not significant (Fisher exact, $p=\FisherKick$). The reason is structural rather
+than statistical: a missed completion is only fatal when it is the last one
+outstanding (Section~\ref{sec:exposure}), so an arm that leaves the window to
+chance can only fail in the fraction of runs where that coincidence occurs.
+Section~\ref{sec:injection} therefore removes the luck by enlarging the window by
+construction.
 
 \emph{Release build.} The \ReleaseRuns{} release runs copy at a median of
 \ReleaseCopyMedian\,s against \CopyMedian\,s for the debug build; the
@@ -674,15 +680,20 @@ case with the same workload and the same guest-log criteria, replacing the
 migration with a hotplug detach four seconds into the copy and a re-attach five
 seconds later.
 
-In all \ReplugRuns{} baseline runs the guest re-enumerated the device after the
-detach moment, and while the copy did complete in \ReplugCompleted{} of
-\ReplugRuns{} runs with a matching digest in \ReplugMd5Match{}, the guest saw up
-to \ReplugReenumMax{} enumerations, \ReplugResetsMax{} resets and
-\ReplugIOErrMax{} lines mentioning an I/O error or a failed request. That is the
-disturbance the design avoids, and it is the same class of event as the one
-Section~\ref{sec:problem} attributes to tearing the session down---except that
-here the guest sees it directly, because the device genuinely disappeared and
-came back.
+In all \ReplugRuns{} baseline runs the copy failed. The guest's own kernel log
+records \code{usb 1-1: USB disconnect, device number 2} at the detach moment,
+followed by up to \ReplugIOErrMax{} \code{blk\_update\_request: I/O error} lines
+for reads that were in flight on \code{sda}; \code{dd} returned non-zero in
+\ReplugRuns{} of \ReplugRuns{} runs and the digest of the partial file matched
+the source in \ReplugDigestMatch{} runs. No re-enumeration appears, because the
+copy had already aborted before the re-attach could bring the device back: the
+run is over from the guest's point of view the moment the device disappears.
+
+That is the cost the design avoids, and it is the same class of event as the one
+Section~\ref{sec:problem} attributes to tearing the session down---but here the
+guest sees it directly. It also shows why "detach and re-attach" is not an
+acceptable implementation of the same-host hand-over: it does not disturb the
+guest, it fails the transfer.
 
 \subsection{Timeline of a representative run}
 Figure~\ref{fig:copy} shows the guest's copy progress for run \ProgressRun{} of
@@ -739,27 +750,99 @@ run.
 The window was \ExposureWindowMin--\ExposureWindowMax\,ms wide, and
 \ExposureRuns{} of the \ExposureMeasured{} acceptance runs had at least one
 completion inside it: \ExposureCompletions{} completions in total, at most
-\ExposureWorst{} in a single run. Each of those completions has its event in the
-guest's event ring but its interrupt delivered to the departing VMM's descriptor,
-so without the kick the guest is never told to look at the ring. The exposure
-rate is \ExposureRate\,\%.
+\ExposureWorst{} in a single run. For each of those completions the event is in
+the guest's event ring but the interrupt went to the departing VMM's descriptor,
+so the guest was not told about it. The exposure rate is \ExposureRate\,\%.
 
-Why a \emph{single} lost edge is fatal, rather than a slowdown: the stick is a
-USB~2.0 Bulk-Only-Transport device, and the guest's mass-storage path keeps
-essentially one command in flight per endpoint. When the completion of that
-command is missed, no further transfer is submitted, so no later completion
-arrives to interrupt the guest and drain the ring. This is exactly the shape of
-the packet-rate trace of Figure~\ref{fig:rate}: the rate falls to zero at the
-hand-over and stays there, with the device still powered and the server still
-holding it. It also explains why the defect looked intermittent---the window is
-only a few milliseconds wide---and why the exposure rate of \ExposureRate\,\% is
-consistent with, and arguably sharper than, the pre-fix failure rate estimated
-from five runs.
+Whether such a missed interrupt is fatal depends on whether it is the
+\emph{last} outstanding completion. The stick is a USB~2.0 Bulk-Only-Transport
+device and the guest's mass-storage path keeps only a few commands in flight, so
+if the completion of the final outstanding command is the one that lands in the
+window, no further transfer is submitted and no later completion arrives to
+interrupt the guest and drain the ring: the copy stops at a fixed byte count,
+which is the stall we reproduced. If, on the other hand, more commands were still
+queued, the next completion interrupts the guest on the new line and it drains
+the ring, including the events it was never interrupted for, and the same
+exposure is harmless. That is why the defect is intermittent in the acceptance
+runs rather than deterministic---and why the \emph{kick-off} arm of
+Table~\ref{tab:arms} is a weak test on its own: it can only fail in the fraction
+of runs where the missed completion happens to be the last one. The injection
+suite of Section~\ref{sec:injection} makes that condition explicit.
+
+\subsection{Deterministic hand-over injection}
+\label{sec:injection}
+The exposure measurement shows that the race happens on its own; it does not by
+itself show that the two hand-over fixes are what make the system survive it. To
+show that, we added two environment-gated hooks that exist only in debug builds:
+one sleeps inside the \code{SetIrqs} handler for a configured time
+\emph{before} the destination's line reaches the interrupter worker, and the
+other makes every connection believe it owns the device, reintroducing the
+stale-teardown defect. The first widens the hand-over window on demand; the
+second disables the ownership guard.
+
+The placement of the delay is the point. While \code{SetIrqs} sleeps, the
+interrupter worker keeps draining completion events onto the departing client's
+line---the window the kick exists to cover---so the number of completions at risk
+grows with the delay. Sleeping in the worker instead would push those events
+behind the line-swap message and \emph{shrink} the exposure rather than enlarge
+it. Table~\ref{tab:injection} gives the outcome; the VMM-side effect of the
+delay is directly visible as downtime (the 5\,s arms report
+$\approx$5\,s).
+
+\begin{table}[t]
+\centering
+\caption{Fault-injection arms (debug build). ``Expected'' is what the mechanism
+predicts; the last column is observed. The hooks are inert when unset, so all
+rows run the same binary.}
+\label{tab:injection}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Injection & Expected & Observed (pass) \\
+\InjectionTableBody
+\end{tabular}
+\end{table}
+
+Three things follow. First, the hooks do nothing when they are not enabled
+(\InjBaselinePass/\InjBaselineN), so the differences below are caused by the
+injections and not by the build. Second, the \emph{ownership guard is
+load-bearing and its absence is deterministically fatal}: with the guard
+disabled the copy fails in all \InjGuardN{} runs
+(\InjGuardPass/\InjGuardN{} pass; Fisher exact against the acceptance arm,
+$p=\FisherGuard$), \code{dd} returns non-zero and the guest kernel logs a 36\,s
+\code{DID\_TIME\_OUT} followed by repeated I/O errors---the source VMM's
+teardown has replaced the destination's interrupt line with a dummy, so the
+guest's commands never complete normally.
+
+Third, the kick is what makes the hand-over robust across the \emph{size} of the
+window, and a long window makes its absence deterministic. With a 500\,ms window
+the kick-enabled arm still passes \InjWindowPass/\InjWindowN, while removing the
+kick passes \InjWindowLossPass/\InjWindowLossN---not zero, because a 500\,ms
+window does not always drain the transfer queue and the guest can still recover
+on the next completion, exactly as in the acceptance runs. Once the window is
+long enough to drain the queue, the distinction is absolute: with a 5\,s window
+the kick-enabled arm passes \InjWinLongOnPass/\InjWinLongOnN{} and the
+kick-disabled arm passes \InjWinLongOffPass/\InjWinLongOffN. In the failing
+runs the copy stops at a fixed byte count and the guest sends no further
+completion until a SCSI timeout expires, i.e.\ the observed failure is the
+mechanism the kick prevents, not a generic timeout.
+
+One caveat is worth stating: the injection arms are mechanism tests, not
+acceptance runs. They hold the workload fixed and change only the server's
+behaviour through a dormant hook, but the enlarged window is synthetic, so the
+arms establish that the fixes are necessary and sufficient \emph{for this
+mechanism}; they do not measure how often the mechanism decides the outcome in
+production.
 
 \subsection{Defects found}
-Table~\ref{tab:defects} summarises the four defects that had to be fixed. The
-first two are deterministic and reproduce on every run; the third is
-timing-dependent and appeared in roughly one run in five before it was fixed.
+Table~\ref{tab:defects} summarises the four defects that had to be fixed. Three
+are deterministic: the single-accept server blocks the destination in the
+handshake on every run, the inverted reset-capability parse makes every
+connection reset the device, and---as the injection of Section~\ref{sec:injection}
+shows---disabling the ownership guard makes the copy fail in every run. Only the
+lost hand-over interrupt is timing-dependent, and it is the one that had to be
+demonstrated by enlarging the window rather than by repeating natural runs.
 
 \begin{table}[t]
 \centering
@@ -847,12 +930,15 @@ granularity at which it is true.
 
 \paragraph{No explicit quiesce.}
 We did not implement a bounded drain of in-flight transfers before the
-hand-over. Transfers that are in flight when the migration happens are handled
-by the re-raise mechanism plus the guest's own retry logic; the guest may
-therefore in principle have to retry a command, although in our runs the
-completion arrived through the re-raise and the copy was not restarted. A
-production implementation would add an explicit quiesce to bound this, and a
-guest-cooperative handshake if the downtime budget were tighter.
+hand-over. Transfers in flight when the migration happens are handled by the
+re-raise mechanism: the injected 5\,s-window experiment
+(Section~\ref{sec:injection}) shows that without that one re-raised interrupt the
+guest can wait indefinitely for a completion that has already been written to
+its event ring, and that with it the copy continues even when the window is
+three orders of magnitude wider than the natural one. What we cannot claim is
+that a transfer is never retried: an explicit quiesce would make the in-flight
+set empty by construction and remove the dependence on where in the command
+queue the hand-over lands.
 
 \paragraph{Scope.}
 The evaluation covers bulk storage on a USB~2.0 stick, one device per

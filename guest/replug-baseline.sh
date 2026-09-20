@@ -53,7 +53,9 @@ log "usbvfiod up (device attached at startup)"
   --user-device "socket=$RUN/usbvfiod.sock" \
   --serial "file=$RUN/console.fifo" --console off \
   --cmdline "root=/dev/vda rw console=ttyS0" > "$RUN/ch.log" 2>&1 &
-pids+=($CH_PID)
+# $! must be captured here: $CH_PID was never assigned, and under `set -u` the
+# script aborted on the next line before the guest had even booted.
+pids+=($!)
 for _ in $(seq 1 60); do "$CHR" --api-socket "$RUN/ch.sock" ping >/dev/null 2>&1 && break; sleep 1; done
 log "guest booted; waiting for the copy to start"
 wait_for "DEMO-COPY: COPY_START" "$RUN/console.log" "$BOOT_TIMEOUT" || { log "copy never started"; exit 1; }

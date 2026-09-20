@@ -84,16 +84,24 @@ arm baseline      ""                                                          PA
 arm window        "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500"                    PASS
 arm window-loss   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL
 arm guard-off     "USBVFIOD_DISABLE_OWNER_GUARD=1"                            FAIL
+# A 500 ms window is not always enough to make the missing kick fatal: the guest
+# can recover if the completion it lost was not the last one outstanding. A 5 s
+# window drains the transfer queue, so the lost completion *is* the last one.
+# MAX_DOWNTIME_MS has to be raised because the injected delay is what the VMM
+# reports as downtime; the acceptance budget does not apply to these arms.
+arm winlong-on    "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000" PASS
+arm winlong-off   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL
 
 echo
 echo "================ INJECTION SUITE SUMMARY ================"
 printf '%-14s %6s %6s %8s\n' arm PASS FAIL expected
-for a in baseline window window-loss guard-off; do
+for a in baseline window window-loss winlong-on winlong-off guard-off; do
   csv="$RUNROOT/results-$a.csv"
   [ -f "$csv" ] || continue
   p=$(awk -F, 'NR>1 && $10=="PASS"' "$csv" | wc -l)
   f=$(awk -F, 'NR>1 && $10=="FAIL"' "$csv" | wc -l)
   printf '%-14s %6s %6s\n' "$a" "$p" "$f"
 done
-echo "(expected: baseline PASS, window PASS, window-loss FAIL, guard-off FAIL)"
+echo "(expected: baseline PASS, window PASS, window-loss FAIL, winlong-on PASS,"
+echo " winlong-off FAIL, guard-off FAIL)"
 echo "raw evidence: $RUNROOT"
