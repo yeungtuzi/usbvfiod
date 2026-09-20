@@ -156,6 +156,10 @@ if ! mount -t exfat -o ro /dev/sda1 /mnt/usb; then
 fi
 say "DEMO-COPY: SOURCE_READY $(date +%s.%N)"
 ls -l /mnt/usb/testfile.bin >> "$LOG" 2>&1 || { say "DEMO-COPY: ERROR no testfile"; exit 1; }
+# Remove any copy left by a previous boot: the heartbeat reports the size of
+# this file as progress, and a stale 128 MiB file would make it look finished
+# before dd has read a single block.
+rm -f /root/testfile.copy
 say "DEMO-COPY: COPY_START $(date +%s.%N)"
 dd if=/mnt/usb/testfile.bin of=/root/testfile.copy bs=1M status=progress 2>> "$LOG"
 # capture the status first: $(date ...) would otherwise reset $?
@@ -188,17 +192,23 @@ EOF
 ln -sf /etc/systemd/system/demo-copy.service rootfs/etc/systemd/system/multi-user.target.wants/demo-copy.service
 
 # Heartbeat: proves whether the guest is actually executing after the migration.
-# Without it a stalled copy is indistinguishable from a frozen VM.
+# Without it a stalled copy is indistinguishable from a frozen VM. It also
+# reports how many bytes of the copy exist so far, which the host uses to
+# request the migration at a fixed *fraction* of the copy instead of after a
+# fixed wall-clock lead - a lead tuned for the debug build lets the much faster
+# release build finish the copy before the migration is even requested, which
+# would fail the "spans the migration" criterion for an irrelevant reason.
 cat > rootfs/usr/local/bin/demo-heartbeat.sh <<'EOF'
 #!/bin/sh
 LOG=/root/demo.log
 i=0
 while true; do
   i=$((i + 1))
-  MSG="DEMO-HEARTBEAT $i $(date +%s) uptime=$(cut -d' ' -f1 /proc/uptime)"
+  COPIED=$(stat -c %s /root/testfile.copy 2>/dev/null || echo 0)
+  MSG="DEMO-HEARTBEAT $i $(date +%s) uptime=$(cut -d' ' -f1 /proc/uptime) copied=$COPIED"
   echo "$MSG" >> "$LOG"
   echo "$MSG" > /dev/ttyS0 2>/dev/null || true
-  sleep 2
+  sleep 1
 done
 EOF
 chmod +x rootfs/usr/local/bin/demo-heartbeat.sh

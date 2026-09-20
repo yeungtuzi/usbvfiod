@@ -370,3 +370,51 @@ MD5 VERDICT          : MATCH
 
 **流程**：注入钩子与匿名作者块已 commit。**注入批次排在验收批次之后**，因为它是 debug 构建；验收批次运行期间**不重建二进制**（`acceptance-batch.sh` 不调用 cargo，脚本已核实）。
 
+
+## D12. 轮次 3：一个被对照臂揪出的方法学缺陷（2026-09-20）
+
+**发现经过**：批次跑到 PHASE C（release 构建的迁移臂）时，第 1 次运行就给出
+`spans=NO` + `VERDICT: FAIL`，但 `md5=MATCH`、`late_enum=0`。原始日志：
+
+```
+COPY_START : 1789885595.129
+COPY_DONE  : 1789885601.476 (rc=0)   -> 复制只用了 6.3 s
+migration epoch : 1789885602.661     -> 迁移请求比复制结束还晚 1.2 s
+spans migration : NO
+```
+
+**根因**（这是我自己的 harness 缺陷，不是 usbvfiod 的缺陷）：harness 在 `COPY_START` 之后
+`sleep 4`，再**启动目标端 VM、等 API、启动 receive-migration、再 sleep 2**，最后才
+`send-migration`。于是在"复制开始"和"迁移请求"之间有约 **3.5 s 的固定开销**。
+debug 构建复制 128 MiB 要 13–38 s，4 s + 3.5 s 的开销落在复制窗口内，所以一直没暴露问题；
+release 构建只要 **6.3 s**，同一时序就变成"复制已经结束，迁移才被请求"。
+
+**这是一个真实的教训**：我把"迁移是否落在复制窗口内"当成验收判据，却用**固定墙钟延迟**去安排迁移。
+判据是对的，触发方式与构建速度耦合。**如果没有 release 对照臂，这个缺陷不会被发现**——
+这正是"必须成对做对照"的价值。
+
+**修复（两处，都是使判据更强而非更松）**
+
+1. **触发改为按复制进度，而不是按墙钟**。
+   - Guest 心跳从 `DEMO-HEARTBEAT n <epoch> uptime=U` 扩展为
+     `DEMO-HEARTBEAT n <epoch> uptime=U copied=B`（`build-guest.sh`），并把心跳周期从 2 s 缩短到 1 s；
+     `demo-copy.sh` 在 `dd` 之前 `rm -f /root/testfile.copy`，避免上一轮遗留的 128 MiB 文件让进度提前"到顶"。
+   - Host 在**启动目标端之后**轮询控制台上的 `copied=`，一达到 `COPY_TRIGGER_BYTES`（默认 16 MiB，即 128 MiB 的 12.5%）
+     就请求迁移；`COPY_LEAD_SECONDS` 默认降为 0，只作为兜底。
+   - 这样迁移点固定在复制的**固定比例**处，与构建速度无关。
+2. **判据从"包含迁移请求"加强为"包含整个迁移"**。
+   - harness 新增记录 `migration.done`（`send-migration` 返回、即切换完成的时刻）。
+   - `verdict.py` 新增 `--migration-done`，当给出时要求
+     `COPY_START < epoch <= done < COPY_DONE`，否则 `spans=NO`。
+   - 原判据只要求迁移**请求**落在复制窗口内；理论上存在"请求在窗口内、但切换完成时复制已结束"的漏洞。
+     现在堵上了。
+
+**代价与处置**：PHASE A（debug 20 次）、PHASE B（control 8 次）用的是旧触发方式，虽然 20/20 全部
+`spans=YES`，但为保持四个臂在同一 harness 下可比，**整批作废重跑**。旧批次已完整留档到
+`artifacts/campaign-A-fixed-lead/`（31 个 run，含 pcap，4.3 GB，附 `SHA256SUMS` 与 `MANIFEST.md`），
+作为"迁移点取在复制开始后约 7.5 s"的独立复现证据保留，不入 git。
+
+**顺带修正**：`/run` 是 6.3 GB 的 tmpfs，容纳不下两批实验（单 run 含 pcap ≈145 MB），
+新批次的 `RUNROOT` 改到磁盘 `/root/usb-runs`（根分区余量 120 GB）；宿主内存已用 56/62 GiB，
+不采用扩大 tmpfs 的做法，以免影响用户正在运行的 4 台虚拟机。
+

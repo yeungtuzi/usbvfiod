@@ -507,14 +507,20 @@ hides the most recent writes. A guest heartbeat service, finally, distinguishes
 \subsection{Methodology}
 The workload is a 128\,MiB file copied from the passed-through stick to the
 guest's own disk with \code{dd}, in a systemd unit that starts at boot. The
-harness waits until the guest reports that the copy has begun, waits a further
-four seconds so that the transfer is in flight, and then migrates the VM. A run
-is successful only if all four of the following hold: the copy window strictly
-contains the migration instant; the MD5 of the copied file equals the MD5 of
-the source file on the stick; the guest shows no enumeration after boot; and no
-reset or I/O error appears. The MD5 comparison is made inside the guest
-against the stick itself, so it also verifies that the device remained readable
-after the migration. The migration was requested with CH's
+harness waits until the guest reports that it has copied 16\,MiB---a fixed
+\emph{fraction} of the file, read from the copy progress the guest puts in its
+heartbeat, rather than a fixed wall-clock lead---and then requests the
+migration. A wall-clock lead is not portable across builds: the release build
+copies the same file several times faster than the instrumented debug build, and
+a lead tuned for one lets the copy finish before the migration is even requested.
+A run is successful only if
+all four of the following hold: the copy window strictly contains the
+\emph{whole} migration, from the request to the completion of the switchover
+(both recorded by the harness); the MD5 of the copied file equals the MD5 of
+the source file on the stick; the guest shows no enumeration after the migration
+uptime; and no reset or I/O error appears. The MD5 comparison is made inside the
+guest against the stick itself, so it also verifies that the device remained
+readable after the migration. The migration was requested with CH's
 \code{downtime\_ms=300} as the per-iteration stop-and-copy goal; the separate
 project acceptance target, used for the verdict, was $\le 2000$\,ms. All runs
 were executed consecutively on the same host with the same stick and the same
@@ -692,15 +698,24 @@ width of that window and the number of completions inside it can be counted per
 run.
 
 The window was \ExposureWindowMin--\ExposureWindowMax\,ms wide, and
-\ExposureRuns{} of the \ExposureMeasured{} runs analysed had at least one
+\ExposureRuns{} of the \ExposureMeasured{} acceptance runs had at least one
 completion inside it: \ExposureCompletions{} completions in total, at most
 \ExposureWorst{} in a single run. Each of those completions has its event in the
 guest's event ring but its interrupt delivered to the departing VMM's descriptor,
-so without the kick the guest is never told to look at the ring. An exposure
-rate of \ExposureRate\,\% is consistent with the pre-fix failure rate we
-observed (one run in five), and it explains why the defect is intermittent: the
-window is only a few milliseconds wide while completions arrive at a few hundred
-per second.
+so without the kick the guest is never told to look at the ring. The exposure
+rate is \ExposureRate\,\%.
+
+Why a \emph{single} lost edge is fatal, rather than a slowdown: the stick is a
+USB~2.0 Bulk-Only-Transport device, and the guest's mass-storage path keeps
+essentially one command in flight per endpoint. When the completion of that
+command is missed, no further transfer is submitted, so no later completion
+arrives to interrupt the guest and drain the ring. This is exactly the shape of
+the packet-rate trace of Figure~\ref{fig:rate}: the rate falls to zero at the
+hand-over and stays there, with the device still powered and the server still
+holding it. It also explains why the defect looked intermittent---the window is
+only a few milliseconds wide---and why the exposure rate of \ExposureRate\,\% is
+consistent with, and arguably sharper than, the pre-fix failure rate estimated
+from five runs.
 
 \subsection{Defects found}
 Table~\ref{tab:defects} summarises the four defects that had to be fixed. The

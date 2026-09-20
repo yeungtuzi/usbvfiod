@@ -8,7 +8,9 @@ lost exactly around the event under test.
 
 Criteria (all must hold):
 
-1. the copy window strictly contains the migration instant;
+1. the copy window strictly contains the whole migration, not just its request:
+   when the harness records the instant the switchover completed
+   (--migration-done), that instant must also fall inside the copy window;
 2. the md5 of the copied file equals the expected digest, and so does the digest
    the guest computed for the source file on the stick;
 3. no USB enumeration after the guest uptime at which the migration happened;
@@ -27,7 +29,7 @@ vacuously true, so the verdict fails closed instead of reporting a pass.
 
 Usage:
   verdict.py --guest-log LOG --expected-md5 MD5 --migration-epoch EPOCH
-             --downtime-ms N --max-downtime-ms N
+             [--migration-done EPOCH] --downtime-ms N --max-downtime-ms N
 
 Exit status: 0 if every criterion passes, 1 otherwise.
 """
@@ -62,6 +64,10 @@ def main() -> int:
     ap.add_argument("--guest-log", required=True)
     ap.add_argument("--expected-md5", required=True)
     ap.add_argument("--migration-epoch", required=True, type=float)
+    ap.add_argument("--migration-done", type=lambda s: float(s) if s not in ("", None) else None,
+                    default=None,
+                    help="host epoch at which send-migration returned (switchover "
+                         "complete); when given it must also fall inside the copy window")
     ap.add_argument("--downtime-ms", type=float, default=None,
                     help="downtime reported by the VMM for this run")
     ap.add_argument("--max-downtime-ms", type=float, default=None,
@@ -92,6 +98,13 @@ def main() -> int:
     if start is not None and done is not None:
         print(f"copy duration        : {done - start:.1f} s")
     print(f"migration epoch      : {args.migration_epoch:.3f} (host clock)")
+    switchover_inside = None
+    if args.migration_done is not None:
+        print(f"migration done       : {args.migration_done:.3f} (host clock)")
+        switchover_inside = (done is not None
+                             and args.migration_epoch <= args.migration_done < done)
+        print(f"switchover inside copy: {'YES' if switchover_inside else 'NO'}")
+        spans = spans and switchover_inside
     print(f"spans migration      : {'YES' if spans else 'NO'}")
     if not spans:
         failures.append("copy-window-does-not-span-migration")

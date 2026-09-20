@@ -26,7 +26,18 @@ DEVICE="${DEVICE:-/dev/bus/usb/001/007}"
 RUN="${RUN:-/run/usb-demo}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"
 COPY_TIMEOUT="${COPY_TIMEOUT:-120}"
-COPY_LEAD_SECONDS="${COPY_LEAD_SECONDS:-4}"
+# When to request the migration. A fixed wall-clock lead is not robust: the
+# release build copies the same file three to five times faster than the debug
+# build, so a lead tuned for one build lets the copy finish before the
+# migration is even requested (the run then fails the "spans" criterion for a
+# reason that has nothing to do with the device). Instead the harness watches
+# the guest's own dd progress output on the console and requests the migration
+# once the copy has passed COPY_TRIGGER_BYTES, i.e. at a fixed *fraction* of the
+# copy, whatever the build. COPY_LEAD_SECONDS is kept only as a lower bound and
+# as the fallback when no progress line appears.
+COPY_TRIGGER_BYTES="${COPY_TRIGGER_BYTES:-16777216}"   # 16 MiB of 128 MiB
+COPY_TRIGGER_TIMEOUT="${COPY_TRIGGER_TIMEOUT:-90}"
+COPY_LEAD_SECONDS="${COPY_LEAD_SECONDS:-0}"
 
 pids=()
 stop_vms() {
@@ -58,6 +69,30 @@ wait_for() { # wait_for <pattern> <file> <timeout-seconds>
   local pat="$1" file="$2" tmo="$3" i=0
   while [ "$i" -lt "$tmo" ]; do
     grep -q "$pat" "$file" 2>/dev/null && return 0
+    sleep 1; i=$((i + 1))
+  done
+  return 1
+}
+
+# Highest byte count reported by the guest so far. The guest heartbeat carries
+# the size of the in-progress copy ("DEMO-HEARTBEAT n <epoch> uptime=U
+# copied=B"), which is build-speed independent; dd's own progress line (which
+# only goes to the guest log, not the console) is accepted as a fallback.
+copy_bytes_seen() {
+  {
+    grep -aoE 'copied=[0-9]+' "$RUN/console.log" 2>/dev/null | grep -aoE '[0-9]+'
+    grep -aoE '[0-9]+ bytes \([0-9.]+ [kMG]?B' "$RUN/console.log" 2>/dev/null | grep -aoE '^[0-9]+'
+  } | sort -n | tail -1
+}
+
+wait_copy_progress() { # wait_copy_progress <target-bytes> <timeout-seconds>
+  local target="$1" tmo="$2" i=0 b
+  while [ "$i" -lt "$tmo" ]; do
+    b="$(copy_bytes_seen)"
+    if [ -n "$b" ] && [ "$b" -ge "$target" ]; then
+      log "guest has copied ${b} bytes (>= ${target}); triggering the migration"
+      return 0
+    fi
     sleep 1; i=$((i + 1))
   done
   return 1
@@ -98,8 +133,8 @@ step "2/6 source VM booted; guest will mount the stick and start copying"
 wait_for "DEMO-COPY: COPY_START" "$RUN/console.log" "$BOOT_TIMEOUT" || {
   log "ERROR: the guest never started copying"; tail -40 "$RUN/console.log"; exit 1
 }
-step "3/6 copy in flight (${COPY_LEAD_SECONDS}s); migrating now"
-sleep "$COPY_LEAD_SECONDS"
+step "3/6 copy in flight; starting the destination"
+[ "${COPY_LEAD_SECONDS}" != "0" ] && sleep "$COPY_LEAD_SECONDS"
 
 # --- 3. destination VM + live migration -------------------------------------
 "$CH" -v --api-socket "$RUN/dst.sock" > "$RUN/dst.log" 2>&1 &
@@ -131,14 +166,26 @@ if [ "${SKIP_MIGRATION:-0}" = "1" ]; then
   exit 0
 fi
 
+step "3b/6 waiting for the guest to pass ${COPY_TRIGGER_BYTES} bytes of the copy"
+if ! wait_copy_progress "$COPY_TRIGGER_BYTES" "$COPY_TRIGGER_TIMEOUT"; then
+  log "WARNING: no copy progress within ${COPY_TRIGGER_TIMEOUT}s (highest seen: '$(copy_bytes_seen)'); migrating anyway"
+  sleep "$COPY_LEAD_SECONDS"
+fi
+
 step "4/6 starting the live migration"
 MIGRATION_EPOCH=$(date +%s.%N)
 "$CHR" --api-socket "$RUN/src.sock" \
   send-migration destination_url=unix:"$RUN/mig.sock",memory_mode=memfds,downtime_ms=300,timeout_strategy=cancel \
   > "$RUN/send.log" 2>&1
 log "send-migration exit=$?"
+# send-migration returns when the switchover has completed. Recording that
+# instant as well lets the verdict require the *whole* migration, not just the
+# request, to fall inside the copy window - otherwise a run could "span" the
+# migration while the guest finished copying before the switchover happened.
+MIGRATION_DONE=$(date +%s.%N)
 step "5/6 migration issued; the copy must continue on the destination"
 echo "$MIGRATION_EPOCH" > "$RUN/migration.epoch"
+echo "$MIGRATION_DONE" > "$RUN/migration.done"
 
 # --- 4. wait for the copy to report completion (console is best effort) -----
 wait_for "DEMO-COPY: MD5_DONE" "$RUN/console.log" "$COPY_TIMEOUT" \
@@ -183,6 +230,7 @@ DOWNTIME_MS=$(grep -aoE 'downtime of [0-9]+ms' "$RUN/src.log" | grep -aoE '[0-9]
 "$DIR/verdict.py" --guest-log "$GLOG" \
   --expected-md5 "$(awk '{print $1}' "$DIR/testfile.md5")" \
   --migration-epoch "$MIGRATION_EPOCH" \
+  --migration-done "${MIGRATION_DONE:-}" \
   --downtime-ms "${DOWNTIME_MS:-0}" \
   --max-downtime-ms "${MAX_DOWNTIME_MS:-2000}"
 RC=$?
