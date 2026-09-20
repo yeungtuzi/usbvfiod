@@ -250,3 +250,44 @@ MD5 VERDICT          : MATCH
 
 ---
 
+## D9. 验收完成与上游 PR（2026-09-20）
+
+**修复后连续 10/10 通过**（验收标准 N=10 达成）：
+
+| # | 停机 | 复制时长 | 跨越迁移 | MD5 | 迁移后重枚举 |
+|---|---|---|---|---|---|
+| 1 | 17 ms | 20.6 s | YES | MATCH | 0 |
+| 2 | 18 ms | 30.2 s | YES | MATCH | 0 |
+| 3 | 15 ms | 33.9 s | YES | MATCH | 0 |
+| 4 | 17 ms | 33.5 s | YES | MATCH | 0 |
+| 5 | 15 ms | 35.3 s | YES | MATCH | 0 |
+| 6 | 16 ms | 32.4 s | YES | MATCH | 0 |
+| 7 | 4 ms | 28.4 s | YES | MATCH | 0 |
+| 8 | 4 ms | 13.2 s | YES | MATCH | 0 |
+| 9 | 6 ms | 15.0 s | YES | MATCH | 0 |
+| 10 | 17 ms | 52.4 s | YES | MATCH | 0 |
+
+**上游 PR（草稿，未提交合并）**
+| PR | 内容 | 分支 |
+|---|---|---|
+| [cyberus-technology/usbvfiod#316](https://github.com/cyberus-technology/usbvfiod/pull/316) | 多客户端 + 陈旧客户端保护 + dma_unmap/reset | `yeungtuzi:pr/multi-client`（仅 `src/` 改动，381 行） |
+| [rust-vmm/vfio#171](https://github.com/rust-vmm/vfio/pull/171) | `resettable` 解析取反修复 | `yeungtuzi:fix/resettable-flag-parsing` |
+
+**关键提交**
+| commit | 内容 |
+|---|---|
+| `575c759` | 多客户端共享 backend + `dma_unmap`/`reset` 实现 + `DynamicBus` 幂等 |
+| `becc84f` | 陈旧客户端不得拆除设备（IRQ 归属者语义） |
+| `abecad6` | 注册 IRQ 后补发踢中断（修复交接窗口丢失中断） |
+| `651f7a2` | 上游 PR 分支（仅源码） |
+
+**CH 侧改动**：仅 `Cargo.toml` 的 `[patch.crates-io]`（指向 `yeungtuzi/vfio` 的 `demo/standalone-crate` 分支），**无代码改动**。
+
+**结论**：同主机 USB 存储直通 live migration 演示目标（R14）**达成**——Guest 在迁移期间完成 128 MiB 复制，数据逐字节一致，无重枚举、无 reset、停机 4–18 ms。
+
+**遗留（如实记录，不阻塞演示）**
+1. 串口控制台在迁移后重置（目标端重建串口设备），Guest 会重印登录横幅——CH 串口设备行为，与 USB 通路无关。
+2. 缺少 usbvfiod 侧显式 quiesce：迁移瞬间在途传输靠"踢中断 + Guest 重试"恢复；如需零重试，需要 D4 的有界 drain。
+3. `--max-clients > 1` 下进程不再随最后一个客户端退出；systemd 场景需显式管理生命周期。
+
+
