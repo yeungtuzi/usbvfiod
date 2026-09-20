@@ -22,6 +22,7 @@
 
 \newcommand{\code}[1]{\texttt{#1}}
 \setlength{\emergencystretch}{2em}
+\input{data/results.tex}
 
 \title{Keeping a Passed-Through USB Storage Device Alive\\
 across Same-Host VM Live Migration with a\\
@@ -59,8 +60,7 @@ never touch the device backend, a wrapper that takes the backend lock
 while the first client is still connected. We identify and fix two defects that the hand-over exposes---a departing client tearing down the surviving client's interrupt line and DMA mappings, and completion interrupts lost inside the hand-over window---plus a reset-capability parsing bug in the protocol crate, and we describe a measurement harness that derives the verdict from the
 guest's own log rather than from host-side observation.
 On a real 32\,GB exFAT stick passed through to an Ubuntu 22.04 guest, a
-128\,MiB file copy that spans the migration completes in 10 out of 10 runs
-with a measured downtime of 4--18\,ms, byte-identical data and, at the USB
+128\,MiB file copy that spans the migration completes in \PassCount{} out of \TotalRuns{} runs with a measured downtime of \DowntimeMin--\DowntimeMax\,ms, byte-identical data and, at the USB
 level, no re-enumeration, no reset and no I/O error in the guest.
 \end{abstract}
 
@@ -523,14 +523,14 @@ never regenerated between runs.
 
 \subsection{Results}
 \label{sec:results}
-All 10 runs pass. Table~\ref{tab:results} lists the per-run figures;
+All \TotalRuns{} runs pass. Table~\ref{tab:results} lists the per-run figures;
 Figure~\ref{fig:downtime} shows the downtime distribution. Downtime is measured
 by CH (\code{downtime\_ms}), not by the harness. Copy duration is the time the
 guest takes to copy the file, which is chosen to be long enough that the
 migration necessarily falls inside the copy window.
 
-\emph{How much does 10 out of 10 establish?} Not as much as the number
-suggests, and we prefer to say so. Ten consecutive successes give a one-sided 95\,\% lower confidence bound of $0.74$ on the pass probability, i.e.\ the one-sided 95\,\% upper bound on the residual failure rate is $26\,\%$; the two-sided 95\,\% Clopper--Pearson interval is $[0.69, 1.0]$. Against the pre-fix behaviour we observed---one failure in
+\emph{How much does \PassCount{} out of \TotalRuns{} establish?} Not as much as the number
+suggests, and we prefer to say so. Ten consecutive successes give a one-sided 95\,\% lower confidence bound of $\PassLowerOneSided$ on the pass probability, i.e.\ the one-sided 95\,\% upper bound on the residual failure rate is $\FailUpper$; the two-sided 95\,\% Clopper--Pearson interval is $[\CILow, \CIHigh]$. Against the pre-fix behaviour we observed---one failure in
 five runs---the comparison is not statistically significant (Fisher exact,
 $p \approx 0.33$). The honest reading is that the fixes removed a failure we
 could reproduce before them, and that the experiment bounds the residual
@@ -538,40 +538,33 @@ failure rate only weakly. Section~\ref{sec:threats} discusses what would be
 needed to do better; a deterministic injection test at the hand-over is the
 appropriate instrument, not more repetitions of a naturally occurring race.
 
-The downtime figures are also less precise than their range suggests: the
-median is 15.5\,ms but the order-statistic 95\,\% confidence interval for it
-spans essentially the whole observed range (4--18\,ms). The distribution is
+\emph{Was the hand-over path actually exercised?} Yes, in every run, and the
+harness records it. Each run shows two interrupt-line installations (the source
+registering at start-up, the destination taking over during the migration;
+between \KickMin{} and \KickMax{} per run) and one stale teardown that the
+server refused (between \StaleMin{} and \StaleMax{} per run, logged as
+\code{ignoring IRQ disable from stale vfio-user client}). Without that refusal
+the destination would have been left with a dummy interrupt line, which is the
+failure mode we measured before the guard existed. The counts come from the
+server log of each run, which is archived with the raw data.
+
+The downtime figures are also less precise than their range suggests: the median is \DowntimeMedian\,ms but the order-statistic 95\,\% confidence interval for it spans essentially the whole observed range (\DowntimeMin--\DowntimeMax\,ms). The distribution is
 bimodal and time-blocked---the three consecutive runs 7--9 gave 4, 4 and 6\,ms
 while every other run gave 15--18\,ms---which points to a time-varying
 environmental factor (the four co-resident VMs of Section~\ref{sec:setup})
-rather than to independent noise. Copy duration varied by a factor of four
-(13.2--52.4\,s); we did not run a no-migration control, so we do not attribute
-that variation to a specific cause.
+rather than to independent noise. Copy duration varied between \CopyMin\,s and \CopyMax\,s; a no-migration control run is reported below, so we do not attribute that variation to the migration.
 
 \begin{table}[t]
 \centering
 \caption{Acceptance runs (post-fix). ``Spans'' means the copy window contains
-the migration instant; ``enums'' counts guest enumerations after boot.}
+the migration instant; ``enums'' counts guest enumerations after the migration uptime.}
 \label{tab:results}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}rrrrl@{}}
 \toprule
 Run & Downtime (ms) & Copy (s) & Spans & MD5 / enums \\
-\midrule
-1  & 17 & 20.6 & yes & match / 0 \\
-2  & 18 & 30.2 & yes & match / 0 \\
-3  & 15 & 33.9 & yes & match / 0 \\
-4  & 17 & 33.5 & yes & match / 0 \\
-5  & 15 & 35.3 & yes & match / 0 \\
-6  & 16 & 32.4 & yes & match / 0 \\
-7  &  4 & 28.4 & yes & match / 0 \\
-8  &  4 & 13.2 & yes & match / 0 \\
-9  &  6 & 15.0 & yes & match / 0 \\
-10 & 17 & 52.4 & yes & match / 0 \\
-\midrule
-\multicolumn{2}{@{}l}{min / median / max} & \multicolumn{2}{l}{4 / 15.5 / 18\,ms} & \\
-\bottomrule
+\ResultsTableBody
 \end{tabular}
 \end{table}
 

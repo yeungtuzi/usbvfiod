@@ -93,3 +93,47 @@
 | 多设备 / 多控制器 / USB 3.0 UAS | **未完成** | 需要额外硬件 |
 | 约 50 处文字润色 | **部分** | 已处理结构性条目；逐句润色留待写作审稿人下一轮复核 |
 
+
+---
+
+## 第五部分：轮次 2 评审结论（2026-09-20）
+
+三位**全新**审稿人以"硕士答辩 / 系统工作坊"为标尺复核，并逐条核验了轮次 1 的修复。
+
+| 审稿人 | 轮次 1 | **轮次 2** | 残留问题 |
+|---|---|---|---|
+| 系统方向 | Reject | **MINOR REVISION**（borderline accept） | 6 项修复全部确认为"真正解决"；新发现 **ownership 守卫 TOCTOU**（已修）；建议补确定性注入测试与基线 |
+| 实验方法学 | Major Revision | **MINOR REVISION** | 判定已全部取自 Guest 日志、以迁移时刻 uptime 为界（已用真实数据复算验证）；新发现**判定脚本 fail-open**（心跳缺失时判据空转 → PASS，审稿人用注入实验证明）、正则覆盖不全、批脚本解析错位、CP 数字标注错误 |
+| 写作格式 | Major Revision | **MINOR REVISION** | 引用顺序/未引用/访问日期全部通过；新发现**三条引用不成立**（我引的页面根本没有相应内容，审稿人逐个 fetch 核验） |
+
+### 本轮的实质性收获（审稿人发现、我已复验并修复）
+
+1. **ownership 守卫 TOCTOU**（系统审稿人）：`owns_device()` 在取后端锁**之前**检查，`irq_owner` 在**释放锁之后**写入。中间窗口里，正在退出的源端可以插入一次"关闭中断"，把目标端刚装上的线替换成 dummy —— 正是该守卫要防的故障。**修复**：新增 `control: Mutex<()>`，把"检查 + 后端变更 + 归属写入"合并为一个临界区。
+2. **判定脚本 fail-open**（方法学审稿人，附可复现的注入实验）：心跳行缺失时 `mig_uptime=None`，dmesg 循环全部 `continue` → `late_enum=late_bad=0` → **PASS**。**修复**：心跳与 dmesg 现在是**必需**项，缺失即 FAIL；并强制 `src==expected`、检查复制退出码、加宽正则（low/full/high/SuperSpeed、`USB disconnect`、端口 reset）、把 downtime 纳入判据。
+3. **三条引用不成立**（写作审稿人 fetch 核验）：
+   - `docs.kernel.org/driver-api/vfio.html` —— **全文 0 次提及 migration**，我却用它引"VFIO 迁移接口"。已改为 Linux 内核 UAPI 头文件 `include/uapi/linux/vfio.h`（已核实含 16 处 VFIO migration 符号）。
+   - QEMU `usb.html` —— **0 次提及 redirection/usbredir**。已改为 SPICE `usbredir` 页面（已核实）。
+   - usb-host "迁移被拒绝" —— 该页无此内容。已改为 libvirt `formatdomain` 文档（已核实含 "can't be interchanged during migration" 原文）。
+4. **统计标注错误**（方法学审稿人复算）：`[0.74,1.0]` 是**单侧** 95% 下界，不是双侧区间；双侧 Clopper–Pearson 为 `[0.69,1.0]`；残余失败率单侧上界为 **26%**（`1-0.05^{1/10}`）。已按此精确标注，并把汇总脚本改为同时输出单侧与双侧。
+5. **`rc=$?` 恒为 0**（方法学审稿人）：`say "… rc=$?"` 里的 `$(date …)` 会重置 `$?`，所以 dd 的退出码永远显示 0。已改为先捕获 `dd_rc=$?`。
+6. **批脚本 5/8 列解析错位、内联 CP 算法错误、相对路径**：已重写，聚合统一交给 `summarize-batch.py`（并新增 bootstrap 中位数区间与 Fisher 精确检验）。
+7. **Table IV 只列 3 个缺陷，实际修了 4 个**（漏了 crate 解析 bug），摘要"two further defects"却列了三项：已统一为四项。
+
+### 本轮新增的验证能力
+| 能力 | 说明 |
+|---|---|
+| `guest/verdict.py`（重写） | 判据全部取自 Guest 日志；以迁移时刻 uptime 为界；**缺失证据即 FAIL（fail-closed）**；含 downtime 预算判据 |
+| `guest/acceptance-batch.sh` + `summarize-batch.py` | N 次运行 → CSV；pass rate + **双侧 Clopper–Pearson** + **bootstrap 中位数区间** + 两臂 **Fisher 精确检验** |
+| `guest/irq-kick-ab.sh` + `USBVFIOD_DISABLE_IRQ_KICK` | **受控 A/B 负对照**：同一二进制内关闭踢中断，用于证明机制而非"碰巧通过" |
+| `guest/replug-baseline.sh` | "朴素方案"基线：不迁移、直接热拔插，测 Guest 侧代价 |
+| `guest/collect-artifacts.sh` | 全部原始文件（含 pcap）留档 + `SHA256SUMS` + `MANIFEST.md` |
+| `guest/sample-host-load.sh` + `artifacts/host-load.log` | 批次期间宿主负载采样，用于归因运行间差异 |
+| `paper/update-results.py` | 论文表格与全部数字宏**由 CSV 自动生成**，杜绝手工抄写 |
+
+### 仍未满足（如实记录，下一轮处理）
+| 项 | 状态 |
+|---|---|
+| 更大样本量（20 migrate + 8 control + 8 release + 8 kick-off A/B + 3 基线） | **正在运行** |
+| 确定性的交接窗口注入测试 | 已有可开关负对照（kick-off 臂）；**放大窗口**的注入钩子未实现 |
+| 多设备 / USB 3.0 UAS / 跨主机 | 无硬件，保持为已声明范围外 |
+| 作者/单位占位符 | **需用户填写**（我不能编造） |
