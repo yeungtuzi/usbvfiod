@@ -603,3 +603,35 @@ CH 的 uptime 锚点，指出**至少 14 个发生在暂停之前**。
 magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移请求）、注入小节不可复现的计数区间、
 `verdict.py` 与暴露分析锚点不一致的说明、`injection-suite.sh` 注释、附录重复追加的指引。
 至此论文中所有评测数字均由脚本生成，无手写数字。
+
+## D18. 事故与纪律：/tmp（tmpfs）被塞满，连带打挂了 KVM 101（2026-09-20）
+
+**发生了什么**：轮次 5 之后我为了尽快收敛，**同时**发起了 3 个评审 subagent，并叠加了构建/分析命令。
+这些命令都经 DSH 执行，而 DSH 的命令通道把包装脚本与输出写在 **`/tmp`（tmpfs，占的是内存）**。
+`/proc/meminfo` 显示 `Shmem` 一度达到 **39 GB**，内存被挤爆后：
+1. 用户的 **KVM 虚拟机 101 崩溃**；
+2. `/mnt/mt` 是 **101 提供的 Samba/CIFS 共享**，因此该文件系统也随之卡死。
+
+**症状的迷惑性**：`bash`/`grep`/`glob` 全部返回 `ENOSPC`，而 `read`/`write` 对 `/root`（ext4）正常。
+原因是 DSH 的执行路径与纯文件系统路径不是同一条：`dsh-bash-local` / `dsh-subprocess-local` /
+`dsh-tool-fs-search`（起 ripgrep）需要可写的临时目录，`dsh-fs-local` 不需要。
+**当时最危险的动作是继续往那个共享里写**——卡死的 CIFS 挂载会让进程进入不可中断睡眠。
+
+**处置**：
+1. 清空 `/tmp`（`find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +`），内存与 Shmem 立即回落；
+2. 用户重启 101 并重新挂载 `/mnt/mt`（`//192.168.100.7/fileserver`，14 TB，余 6.6 TB）；
+3. 新增 `scripts/archive-pcaps-to-mnt.sh`：把 161 个 `usb.pcap`（**20.5 GB**）搬到
+   `/mnt/mt/usbvfiod-artifacts/`，先复制成功再删源、按 run 名+大小+sha256 去重、
+   并重建各批次 `SHA256SUMS` 与 `PCAPS.md` 指针。
+   **所有对网络的访问都用 `timeout` 包裹**，共享挂不上时直接退出而不是挂死。
+4. 顺带核实：`/root/usb-runs`、`/root/usb-inject` 里的 pcap 与归档树中的**逐字节重复**（85 个），
+   已先删掉这些重复副本，释放 **9.4 GB**；删除后 `update-results.py` 仍能**逐字节**重生成 `paper/data/results.tex`。
+5. `/` 从 104 GB 占用降到 **75 GB**（111 GB 可用）。
+
+**纪律（写进流程，后续严格遵守）**
+- **不把 `/tmp` 当存储**：所有中间产物写到 `/root/.dsh-tmp`（ext4），命令统一 `export TMPDIR=/root/.dsh-tmp`。
+- **限制并发**：评审 subagent **一次只跑一个**，并明确要求"不要复制原始数据、不要写 `/tmp`"。
+- **动手前看水位**：`df -h /tmp` 与 `free -g`，异常就先清理再继续。
+- **对可能挂死的网络挂载**：只用 `timeout` 包裹的探测，绝不裸 `stat`/`cd`/`cp`。
+- **绝不再为了速度同时堆叠多个重任务**——这次代价是打挂了用户正在用的虚拟机。
+

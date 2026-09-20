@@ -59,7 +59,19 @@ dest_mnt="$(mount_of "$DEST")"
 for src in "$ARCHIVE" "${LIVE[@]}"; do
   [ -d "$src" ] || continue
   if [ "$(mount_of "$src")" = "$dest_mnt" ]; then
-    echo "ERROR: $src and $DEST are both on $dest_mnt; this would not free space" >&2
+    echo "ERROR: $src and $DEST are both on $dest_mnt; moving would not free space." >&2
+    case "$DEST" in
+      /mnt/*)
+        parent="/mnt/$(echo "${DEST#/mnt/}" | cut -d/ -f1)"
+        if grep -q " $parent " /proc/mounts; then
+          echo "       $parent is mounted, but $DEST still resolves to $dest_mnt." >&2
+        else
+          echo "       $parent is not in /proc/mounts, i.e. the share is not mounted" >&2
+          echo "       and $DEST is a plain directory on the root filesystem." >&2
+          echo "       Mount the share first, then re-run." >&2
+        fi
+        ;;
+    esac
     exit 3
   fi
 done
