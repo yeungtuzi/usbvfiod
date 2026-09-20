@@ -41,7 +41,7 @@ wait_api() {
 }
 
 if [ "$MODE" = userdev ]; then
-  "$USBVF" --socket-path "$D/usbvfiod.sock" -v > "$D/usbvfiod.log" 2>&1 &
+  "$USBVF" --socket-path "$D/usbvfiod.sock" --max-clients 4 -v > "$D/usbvfiod.log" 2>&1 &
   USB_PID=$!
   for _ in $(seq 1 20); do [ -S "$D/usbvfiod.sock" ] && break; sleep 0.5; done
   echo "[usbvfiod] pid=$USB_PID"

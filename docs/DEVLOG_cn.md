@@ -134,8 +134,44 @@
 
 ---
 
-## D6. 多客户端实现（进行中）
+## D6. 多客户端实现与实测（2026-09-20）——死锁已消除
 
-（实现与实测结果在下一条记录中追加。）
+**目标**：实现方案 B 并验证迁移死锁消失。
+
+**实现**（提交 `575c759`）
+- `src/shared_backend.rs`（新增）：`SharedBackend<CRD>` 包装 `Arc<Mutex<XhciBackend<CRD>>>`，`ServerBackend` 的每个方法**按次加锁**，握手命令不经过 backend。
+- `src/main.rs`：新增 `run_multi_client`；起 N 个线程，各自循环 `server.run(&mut SharedBackend)`。
+- `src/cli.rs`：新增 `--max-clients`（默认 1 = 完全保留原行为）。
+- `src/dynamic_bus.rs`：`add` 改为同址幂等（同 `start_addr` 替换；异址重叠仍报错）；新增 `remove_range`；失败不再污染 bus 状态。
+- `src/xhci_backend.rs`：`dma_map` 改用 `add` 并返回 `io::Error`（不再 `unwrap`）；**实现 `dma_unmap`**（CH 拆除设备时会调用，原为 `todo!()`）；`reset()` 明确返回错误而非 `todo!()`。
+- `Server::new(..., resettable = false, ...)`。
+
+**得（实测，实验 B userdev）**
+```
+Migration completed after 0.0s with a downtime of 13ms (goal was 300ms)
+event = migration-receive-finished → resumed
+RESULT: mode=userdev send_rc=0 outcome=migrated
+```
+- **死锁消失**（此前：目标端卡在 `Restoring virtio-pci _vfio_user0 resources`，199.9 s 零进展）。
+- usbvfiod 收到**两次** client version 握手（源端 + 目标端），源端断开后 `vfio-user client disconnected, accepting the next one`。
+- `cargo test` **112 passed**（新增 3 个 DynamicBus 测试）；`clippy --deny warnings` clean。
+
+**失**
+- 日志出现 `Error handling command: 13`（命令 13 = `DeviceReset`）。原因：`resettable` 的解析在 **Client 侧（即 CH）**，我把 `resettable` 从 `true` 改为 `false` 后，crate 的取反 bug 反而让 CH 认为"设备可 reset"，于是**每次连接**都发 `VFIO_USER_DEVICE_RESET`（迁移时源端、目标端各一次）。
+- **回退记录**：先误把 crate 补丁加到 usbvfiod（usbvfiod 只用 `Server`，根本不需要）→ 无效果；且 `vfio_user` 通过 **path** 依赖 monorepo 内的 `vfio-bindings`，导致同一 crate 出现两个来源（crates.io + git），编译报 3 处 E0308 类型不匹配。**已回退 usbvfiod 的 `Cargo.toml`/`Cargo.lock`**。
+- 正确做法：patch **CH**（Client 在 CH 内），并同时 patch `vfio-bindings` 到同一 git 源以统一类型。
+
+**发现（影响 PR 目标仓库）**：`rust-vmm/vfio-user` 已于 **2025-05-19 归档**，代码迁至 **`rust-vmm/vfio`** 单仓，其中 `vfio-user/` 子目录即 `vfio_user 0.1.5`。已 fork `yeungtuzi/vfio`，修复并推送分支 **`fix/resettable-flag-parsing`**（commit `3a645f8`）。
+
+**网络（重要，已记录）**：本机访问外网（GitHub / Google / HuggingFace）需代理
+`socks5h://192.168.100.4:1080`。已写入全局 git 配置（`http.proxy` / `https.proxy`），**对所有项目生效**。
+
+**后续**：用 patch 后的 CH 复测，确认 `DeviceReset` 错误消失；然后进入真实 demo（U 盘 + Guest 内文件复制 + 迁移 + 校验）。
+
+---
+
+## D7. 真实 demo 打通（进行中）
+
+（下一条记录追加。）
 
 ---
