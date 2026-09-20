@@ -1,0 +1,21 @@
+# Guest image build artifacts — not tracked (multi-GB).
+# Rebuild with ./build-guest.sh (requires the Ubuntu live-server ISO and
+# the squashfs-tools / initramfs-tools-core packages).
+
+# extracted from the ISO
+casper/
+
+# unpacked squashfs rootfs
+rootfs/
+
+# generated disk image
+*.img
+*.qcow2
+*.raw
+
+# generated initramfs (rebuilt by build-guest.sh)
+initrd-custom.gz
+
+# runtime logs / sockets
+*.log
+*.sock
