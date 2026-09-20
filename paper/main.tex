@@ -401,8 +401,10 @@ sends two destructive commands: \code{SetIrqs} with an empty descriptor list
 \emph{after} the destination has already registered its own interrupts and DMA
 mappings, and both would be applied to the shared backend. The result we
 measured is severe: the destination is left with a dummy interrupt line, no
-completion is ever signalled, and the guest concludes that the controller is
-dead and aborts the running I/O.
+completion is ever signalled, the guest's commands time out and the running I/O
+fails. Section~\ref{sec:injection} reproduces exactly this by disabling the
+guard on purpose: five runs out of five fail, with a 36\,s command timeout and
+repeated I/O errors in the guest's kernel log.
 
 The wrapper therefore tracks which connection most recently registered
 interrupts and lets only that connection issue the destructive counterparts.
@@ -421,16 +423,22 @@ the currently installed interrupt line. During a hand-over there is a window in
 which a transfer may complete \emph{before} the destination's line is
 installed: the completion event is written into the guest's event ring (which
 is in guest memory and therefore already correct), but the interrupt is
-delivered to the event descriptor of the VMM that is exiting. The event is
-then never noticed: the guest does not re-read its event ring without an
-interrupt, the copy stalls, and---because the USB stack eventually tries to
-recover---the guest starts issuing device resets that the emulated controller
-correctly rejects as a context state error.
+delivered to the event descriptor of the VMM that is exiting. If that completion
+is the last one outstanding, the guest never learns that it completed---it does
+not re-read its event ring without an interrupt---and the copy stops at a fixed
+byte count until the block layer's command timeout expires; in our failing runs
+that produced repeated I/O errors rather than a recovery. If more commands were
+still queued, the next completion interrupts the guest on the new line and the
+guest drains the ring, including the event it was not told about. That is why
+the defect is intermittent, and why it is established in this paper by injection
+rather than by repeating natural runs (Section~\ref{sec:injection}).
 
 Our fix is to re-raise one interrupt immediately after a new line is installed.
 A spurious MSI-X interrupt is harmless: the guest inspects the event ring,
 finds the pending completion (or nothing) and continues. This converts a lost
-interrupt into at most one redundant ring scan.
+interrupt into at most one redundant ring scan, and the 5\,s-window experiment
+shows that one such interrupt is sufficient even when the window is three orders
+of magnitude wider than the natural one.
 
 \subsection{DMA mapping idempotence}
 \label{sec:dma}
@@ -855,7 +863,7 @@ demonstrated by enlarging the window rather than by repeating natural runs.
 Defect & Symptom & Fix \\
 \midrule
 single-accept server & destination blocks 199.9\,s in the handshake & per-command lock, multi-client accept \\
-stale teardown & guest declares controller dead after migration & interrupt-ownership rule \\
+stale teardown & guest I/O times out and the copy fails after migration & interrupt-ownership rule \\
 lost hand-over interrupt & copy stalls with no error (intermittent) & re-raise one interrupt on registration \\
 inverted reset-capability parse (crate) & every connection issues a device reset & equality test instead of inequality \\
 \bottomrule
