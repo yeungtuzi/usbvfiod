@@ -1,7 +1,7 @@
 # PR: vfio-user: fix inverted RESET capability parsing
 
 Target: `rust-vmm/vfio` (main)
-Branch: `yeungtuzi:fix/resettable-flag-parsing`
+Branch: `<fork-owner>:fix/resettable-flag-parsing`
 
 ## Problem
 

@@ -27,9 +27,9 @@
 }
 
 @inproceedings{agache2020firecracker,
-  author    = {Agache, Alexandru and Brooker, Marc and Iordache, Andreea and
-               Liguori, Anthony and Neugebauer, Rolf and Piwonka, Phil and
-               Popa, Diana-Maria},
+  author    = {Agache, Alexandru and Brooker, Marc and Florescu, Andreea and
+               Iordache, Alexandra and Liguori, Anthony and Neugebauer, Rolf and
+               Piwonka, Phil and Popa, Diana-Maria},
   title     = {Firecracker: Lightweight Virtualization for Serverless
                Applications},
   booktitle = {Proc. 17th USENIX Symp. Networked Systems Design and
@@ -196,12 +196,14 @@
   url    = {https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/vfio.h}
 }
 
-@misc{libvirtformatdomain,
+@misc{libvirtmigrationsrc,
   author = {{libvirt project}},
-  title  = {Domain {XML} Format --- Host Device Assignment},
-  note   = {Documents that a passed-through {USB} host device cannot be
-            interchanged during migration. Accessed: 2026-09-20},
-  url    = {https://libvirt.org/formatdomain.html}
+  title  = {libvirt source: \texttt{qemuMigrationSrcIsAllowedHostdev}},
+  note   = {Permits migration of a domain with a USB host device and forbids
+            other host devices; the source comment calls the USB case
+            ``migrated'' in quotation marks, i.e.\ the device is detached and
+            re-attached. Accessed: 2026-09-20},
+  url    = {https://gitlab.com/libvirt/libvirt/-/blob/master/src/qemu/qemu_migration.c}
 }
 
 @misc{usbredir,

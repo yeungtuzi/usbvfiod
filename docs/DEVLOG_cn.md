@@ -83,7 +83,7 @@
 
 **目标**：接入真实 U 盘，打通 demo Step 1–2 并建立可脚本化的 Guest 控制通道。
 
-**设备事实**：Innostor `1f75:0903`，路径 `1-7`，**32 GB**（非用户所说 16 GB），exfat 卷标 `刘湛渊-U盘-32GB` + `VTOYEFI`（Ventoy 启动盘，数据分区为空）。
+**设备事实**：Innostor `1f75:0903`，路径 `1-7`，**32 GB**（非用户所说 16 GB），exfat 卷标 `<stick-volume-label>` + `VTOYEFI`（Ventoy 启动盘，数据分区为空）。
 
 **得**
 - usbvfiod `detach_and_claim_interface` 抢占成功：宿主驱动 `usb-storage` → `usbfs`，`/dev/sdb` 从宿主消失；Guest 内出现 `/dev/sda`（29.8G，sda1 exfat + sda2 vfat）。
@@ -103,7 +103,7 @@
 - 证据：改动前后 `qm list` 的 4 台 VM **PID 完全相同**（3220/2188/2299/4021624）。
 
 **产物**：`guest/demo-guest.sh`、`guest/guest-exec.py`、`guest/build-guest.sh`（extras 步骤）、`guest/README.md`（提交 `ae63f63`）。
-**Fork**：`yeungtuzi/{usbvfiod, cloud-hypervisor, vfio-user}` 全部就绪。
+**Fork**：`<fork-owner>/{usbvfiod, cloud-hypervisor, vfio-user}` 全部就绪。
 
 ---
 
@@ -161,10 +161,10 @@ RESULT: mode=userdev send_rc=0 outcome=migrated
 - **回退记录**：先误把 crate 补丁加到 usbvfiod（usbvfiod 只用 `Server`，根本不需要）→ 无效果；且 `vfio_user` 通过 **path** 依赖 monorepo 内的 `vfio-bindings`，导致同一 crate 出现两个来源（crates.io + git），编译报 3 处 E0308 类型不匹配。**已回退 usbvfiod 的 `Cargo.toml`/`Cargo.lock`**。
 - 正确做法：patch **CH**（Client 在 CH 内），并同时 patch `vfio-bindings` 到同一 git 源以统一类型。
 
-**发现（影响 PR 目标仓库）**：`rust-vmm/vfio-user` 已于 **2025-05-19 归档**，代码迁至 **`rust-vmm/vfio`** 单仓，其中 `vfio-user/` 子目录即 `vfio_user 0.1.5`。已 fork `yeungtuzi/vfio`，修复并推送分支 **`fix/resettable-flag-parsing`**（commit `3a645f8`）。
+**发现（影响 PR 目标仓库）**：`rust-vmm/vfio-user` 已于 **2025-05-19 归档**，代码迁至 **`rust-vmm/vfio`** 单仓，其中 `vfio-user/` 子目录即 `vfio_user 0.1.5`。已 fork `<fork-owner>/vfio`，修复并推送分支 **`fix/resettable-flag-parsing`**（commit `3a645f8`）。
 
 **网络（重要，已记录）**：本机访问外网（GitHub / Google / HuggingFace）需代理
-`socks5h://192.168.100.4:1080`。已写入全局 git 配置（`http.proxy` / `https.proxy`），**对所有项目生效**。
+`socks5h://<proxy-host>:1080`。已写入全局 git 配置（`http.proxy` / `https.proxy`），**对所有项目生效**。
 
 **后续**：用 patch 后的 CH 复测，确认 `DeviceReset` 错误消失；然后进入真实 demo（U 盘 + Guest 内文件复制 + 迁移 + 校验）。
 
@@ -270,8 +270,8 @@ MD5 VERDICT          : MATCH
 **上游 PR（草稿，未提交合并）**
 | PR | 内容 | 分支 |
 |---|---|---|
-| [cyberus-technology/usbvfiod#316](https://github.com/cyberus-technology/usbvfiod/pull/316) | 多客户端 + 陈旧客户端保护 + dma_unmap/reset | `yeungtuzi:pr/multi-client`（仅 `src/` 改动，381 行） |
-| [rust-vmm/vfio#171](https://github.com/rust-vmm/vfio/pull/171) | `resettable` 解析取反修复 | `yeungtuzi:fix/resettable-flag-parsing` |
+| [cyberus-technology/usbvfiod#316](https://github.com/cyberus-technology/usbvfiod/pull/316) | 多客户端 + 陈旧客户端保护 + dma_unmap/reset | `<fork-owner>:pr/multi-client`（仅 `src/` 改动，381 行） |
+| [rust-vmm/vfio#171](https://github.com/rust-vmm/vfio/pull/171) | `resettable` 解析取反修复 | `<fork-owner>:fix/resettable-flag-parsing` |
 
 **关键提交**
 | commit | 内容 |
@@ -281,7 +281,7 @@ MD5 VERDICT          : MATCH
 | `abecad6` | 注册 IRQ 后补发踢中断（修复交接窗口丢失中断） |
 | `651f7a2` | 上游 PR 分支（仅源码） |
 
-**CH 侧改动**：仅 `Cargo.toml` 的 `[patch.crates-io]`（指向 `yeungtuzi/vfio` 的 `demo/standalone-crate` 分支），**无代码改动**。
+**CH 侧改动**：仅 `Cargo.toml` 的 `[patch.crates-io]`（指向 `<fork-owner>/vfio` 的 `demo/standalone-crate` 分支），**无代码改动**。
 
 **结论**：同主机 USB 存储直通 live migration 演示目标（R14）**达成**——Guest 在迁移期间完成 128 MiB 复制，数据逐字节一致，无重枚举、无 reset、停机 4–18 ms。
 
@@ -507,4 +507,59 @@ harness 的 `kicks` 列也相应改为统计后者（此前误统计前者的数
 **关于"1/5 失败率"的修正**：早期把修复前约 1/5 的卡死全部归因于丢失中断；现在证据显示，
 自然窗口下丢失中断只在"恰为最后一个未完成命令"时才致命（约 1/8），而**归属缺陷**是确定致命的那一个。
 论文已按此改写：不再声称"单个丢失沿必然致命"，而是给出两种结局的判据（是否最后一个未完成命令）。
+
+
+## D15. 轮次 3 评审：三位审稿人都指出"叙述超出证据"，逐条修正（2026-09-20）
+
+轮次 3 的结论是 **系统 Major / 方法学 Major / 写作 Minor**。三位**独立**发现了同一个最严重问题，
+这在本次迭代里是最有价值的一次外部检验。
+
+### 最严重的问题：交接窗口锚点错了（两位审稿人独立发现）
+
+我把"暴露窗口"的起点定义在 **迁移请求**（`migration.epoch`），并在论文里断言"从这一刻起源端已暂停"。
+CH 默认 pre-copy，源端真正暂停要晚 **1.9–6.2 ms**；审稿人把 24 个"有风险"的完成事件逐个映射到
+CH 的 uptime 锚点，指出**至少 14 个发生在暂停之前**。
+
+**修复**：窗口起点改为从 `src.log` 解析出的 `event = paused` 时刻，并同时输出请求锚定的严格上界。
+重算：**8/20 次、10 个完成事件、窗口 2.99–17.70 ms**（上界 11/20、24、5.00–23.87 ms）。
+结论方向不变（窗口确实自然非空），但数字从"多数运行"降到"四成运行"——这正是审稿人说的
+"这是'证明'与'在少数运行中证明'的区别"。
+
+### 第二个教训：小样本的 3/3 vs 0/3 是运气
+
+原 5 s 注入臂只有 3 次/臂，$p=0.10$ 不显著，而且是 500 ms 臂预测失败**之后**追加的。
+把两臂各扩到 8 次后：**8/8 vs 2/8，$p=0.007$**——仍有 2/8 恢复，所以"确定性失败"的说法也必须收回。
+500 ms 臂从 5 次扩到 10 次后是 **4/10**（原来 4/5 看起来"基本没问题"，其实是小样本假象），$p=0.044$。
+
+**教训**：**"确定性"不能靠 3 次运行加上一个完美分裂来宣称**。本轮把"确定性"只留给
+0/5 的归属守卫臂；踢中断的结论改为"受控放大窗口下显著，且给出了效力"。
+
+### 其他被审稿人揪出的问题（都已修）
+
+1. **downtime 判定 fail-open**：harness 把缺失的停机值传成 `0`，于是"日志里没有停机行"= 0 ms 通过。
+   审稿人用真实日志演示了 `--max-downtime-ms 0` 仍 PASS。已改为原样传递 + 空值即 FAIL。
+2. **`migration.done` 不是切换完成时刻**：它比 CH 自己的 `Migration completed` 早 4.6–15.3 ms，
+   判据实际只保证"复制包含请求"。已新增 `--src-log`，改用 CH 日志里的真正完成时刻。
+   已有批次用 `reverify-batch.py` **离线重判**（不重跑虚拟机），结论不变。
+3. **效力分析缺失**：论文声称讨论了效力但没有。已实现精确无条件 Fisher 效力：自然 kick 比较 0.067，
+   达 80% 需 62 次/臂；5 s 臂 0.88。
+4. **引用错误**：`libvirtformatdomain` 讲的是 `usb-bot`/`usb-storage` 磁盘模型，不是 hostdev USB 直通；
+   而且**原句说反了**——libvirt 源码 `qemuMigrationSrcIsAllowedHostdev` 明确允许 USB hostdev 迁移
+   （注释里 "migrated" 带引号）。已改为引用 libvirt 源码，并据此把"朴素热拔插"重新定位为
+   QEMU/libvirt 的实际做法——这反而让基线对比更有意义。
+5. **身份泄露**：`guest/testfile.md5` 的卷标里含真实姓名，DEVLOG 里有 GitHub 句柄与代理 IP。
+   新增 `docs/redact-identifiers.py` 做可审计的脱敏（11 处），并提交。
+6. **归档不可复算**：`collect-artifacts.sh` 只拷 run 目录，缺 `results-*.csv`；MANIFEST 的指标列全空
+   （它去 Guest 日志里找只存在于 harness stdout 的行）。已补齐批次级文件，并用 `make-manifest.py`
+   调用 `verdict.py` 重新推导——44 行真实数据，43/44 PASS。
+7. **`make data` 崩溃**：硬编码 `paper/data/runs.dat`，从 `paper/` 运行时 FileNotFoundError。已修。
+8. 其他：注入钩子作用域声明、guard-off 同时关闭 DmaUnmap 半、reset 修复降级为"未做消融"、
+   测试数 108→111、速率 4–10 MiB/s、控制臂仅校验和、热拔插结论句自相矛盾、Firecracker 作者少一人、
+   图注补数据来源、删除跟踪的 `__pycache__` 与失效 CSV、页数不再写死。
+
+### 流程层面的教训
+
+**"我自己写的测量脚本"同样需要外部审计**：本轮三个最严重的问题（窗口锚点、fail-open downtime、
+`migration.done` 语义）全部出在测量与判定代码里，而不是在被测系统里。论文的可信度主要取决于
+这些地方，而不是设备代码。
 

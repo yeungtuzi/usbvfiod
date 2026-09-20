@@ -140,7 +140,7 @@ $ cd /root/lvllm/usbvfiod/guest && PAUSE=1 ./usb-migration-demo.sh
 
 **预期输出 / Expected**
 ```
-[demo] ==== 3/6 copy in flight (4s); migrating now ====
+[demo] ==== 3/6 copy in flight; waiting for 16 MiB of progress, then migrating ====
 ```
 
 ---
@@ -208,7 +208,7 @@ $ cd /root/lvllm/usbvfiod/guest && PAUSE=1 ./usb-migration-demo.sh
 migration line       : Migration completed after 0.0s with a downtime of 4ms (goal was 300ms)
 spans migration      : YES (start before, end after)
 MD5 VERDICT          : MATCH
-enumerations >30s    : 0 (expected: 0 = no re-enumeration after boot)
+enumerations after migration : 0 (expected: 0 = no re-enumeration at/after the migration)
 (no resets / no I/O errors)
 ```
 
@@ -257,7 +257,7 @@ enumerations >30s    : 0 (expected: 0 = no re-enumeration after boot)
 
 **Q6：这个演示能重复吗？**
 > 中：能。修复后连续 20 次全部通过（另有不迁移对照、release 构建臂与注入实验，见 `docs/DEVLOG_cn.md` D14）；`./usb-migration-demo.sh` 一条命令即可重跑并打印判定表。
-> EN: Yes. After the fix we ran it 10 times in a row with 10 passes; `./usb-migration-demo.sh` reruns it and prints the verdict table.
+> EN: Yes. After the fix we ran it 20 times in a row with 20 passes (plus a no-migration control, a release-build arm, a kick-disabled negative control, a naive detach/re-attach baseline and a fault-injection suite; see `docs/DEVLOG_cn.md` D14). `./usb-migration-demo.sh` reruns it and prints the verdict table.
 
 ---
 
@@ -287,7 +287,7 @@ cd /root/lvllm/usbvfiod/guest && PAUSE=1 ./usb-migration-demo.sh
 ./usb-migration-demo.sh | tail -20
 
 # 产物 / artifacts
-/run/usb-demo/{console.log,guest-demo.log,src.log,dst.log,usbvfiod.log,usb.pcap}
+$RUN/{console.log,guest-demo.log,src.log,dst.log,usbvfiod.log,usb.pcap} (batches now use RUNROOT on disk, e.g. /root/usb-runs)
 
 # 关键期望值 / key expected value
 d62dd28c4faf1bbe19e300a3b605e503   # testfile.bin md5
@@ -296,5 +296,5 @@ d62dd28c4faf1bbe19e300a3b605e503   # testfile.bin md5
 **判定通过的四个必要条件 / The four pass conditions**
 1. `spans migration : YES` — 复制跨越了迁移 / the copy spans the migration
 2. `MD5 VERDICT : MATCH` — 数据逐字节一致 / data identical
-3. `enumerations >30s : 0` — 迁移后无重枚举 / no re-enumeration
+3. `enumerations after migration : 0` — 迁移后无重枚举 / no re-enumeration
 4. `(no resets / no I/O errors)` — 无 reset、无 I/O 错误 / no resets, no I/O errors

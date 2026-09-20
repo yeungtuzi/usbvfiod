@@ -68,10 +68,18 @@ def main() -> int:
                     default=None,
                     help="host epoch at which send-migration returned (switchover "
                          "complete); when given it must also fall inside the copy window")
-    ap.add_argument("--downtime-ms", type=float, default=None,
-                    help="downtime reported by the VMM for this run")
+    ap.add_argument("--downtime-ms", type=lambda s: float(s) if s not in ("", None) else None,
+                    default=None,
+                    help="downtime reported by the VMM for this run; when a budget "
+                         "is given and this is missing the run FAILS (fail closed)")
     ap.add_argument("--max-downtime-ms", type=float, default=None,
                     help="acceptance budget; enforced when given")
+    ap.add_argument("--src-log", default=None,
+                    help="optional Cloud Hypervisor source log. When given, the "
+                         "instants at which CH logged the VM as paused and the "
+                         "migration as completed are derived from it and used "
+                         "instead of the send-migration return time, which is "
+                         "earlier than both.")
     args = ap.parse_args()
 
     try:
@@ -98,9 +106,51 @@ def main() -> int:
     if start is not None and done is not None:
         print(f"copy duration        : {done - start:.1f} s")
     print(f"migration epoch      : {args.migration_epoch:.3f} (host clock)")
+
+    # The request instant is not the instant the VM stops running: CH does a
+    # pre-copy, so the guest keeps executing for a few milliseconds afterwards.
+    # When the VMM log is available, derive the pause and completion instants
+    # from its own event stream, anchored at the VmSendMigration API request
+    # (whose uptime corresponds to the migration epoch recorded by the harness).
+    ch_rel = {}
+    pause_host = None
+    completed_host = None
+    if args.src_log:
+        try:
+            lines = open(args.src_log, errors="replace").read().splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            m = re.match(r"^\S+:\s+([\d.]+)s:", line)
+            if not m:
+                continue
+            t = float(m.group(1))
+            if "API request event: VmSendMigration" in line:
+                ch_rel["req"] = t
+            elif "event = paused" in line:
+                ch_rel["paused"] = t
+            elif "Migration completed after" in line:
+                ch_rel["completed"] = t
+        if "req" in ch_rel:
+            if "paused" in ch_rel:
+                pause_host = args.migration_epoch + (ch_rel["paused"] - ch_rel["req"])
+                print(f"source paused        : {pause_host:.3f} (host clock, "
+                      f"{1000 * (ch_rel['paused'] - ch_rel['req']):.2f} ms after the request)")
+            if "completed" in ch_rel:
+                completed_host = args.migration_epoch + (ch_rel["completed"] - ch_rel["req"])
+                print(f"migration completed  : {completed_host:.3f} (host clock, "
+                      f"{1000 * (ch_rel['completed'] - ch_rel['req']):.2f} ms after the request)")
+
     switchover_inside = None
-    if args.migration_done is not None:
-        print(f"migration done       : {args.migration_done:.3f} (host clock)")
+    if completed_host is not None:
+        switchover_inside = done is not None and args.migration_epoch <= completed_host < done
+        print(f"whole migration inside copy: {'YES' if switchover_inside else 'NO'}")
+        spans = spans and switchover_inside
+    elif args.migration_done is not None:
+        # Fallback: the instant send-migration returned. It is a few
+        # milliseconds earlier than CH's own completion log line.
+        print(f"migration done (send-migration return, weaker bound): "
+              f"{args.migration_done:.3f} (host clock)")
         switchover_inside = (done is not None
                              and args.migration_epoch <= args.migration_done < done)
         print(f"switchover inside copy: {'YES' if switchover_inside else 'NO'}")

@@ -7,8 +7,8 @@ USB storage device survives a same-host Cloud Hypervisor live migration.
 ## Build
 
 ```console
-$ make                      # -> main.pdf   (IEEEtran, two columns, 11 pages)
-$ xelatex abstract_zh.tex   # -> abstract_zh.pdf (Chinese abstract, 2 pages)
+$ make                      # -> main.pdf   (IEEEtran, two columns)
+$ xelatex abstract_zh.tex   # -> abstract_zh.pdf (Chinese abstract)
 ```
 
 `make` needs `texlive-latex-*`, `texlive-pictures` (TikZ/PGFPlots) and
@@ -60,6 +60,23 @@ The harness lives in `../guest/`; `../guest/campaign-b.sh` documents exactly how
 the arms of the round-3 campaign were produced and `../guest/injection-suite.sh`
 how the fault-injection arms were. Raw logs, checksums and manifests go to
 `../artifacts/`; the packet captures are large and are delivered separately.
+
+Prerequisites that are *not* in this repository, and that a third party needs:
+
+| item | how to get it | why |
+|---|---|---|
+| Ubuntu 22.04.4 live-server ISO | `guest/build-guest.sh` takes it from `ISO=/path/to/ubuntu-22.04.4-live-server-amd64.iso` | the guest rootfs is unpacked from it; the built `rootfs.img` is gitignored (4 GB) |
+| `linux-modules-extra-5.15.0-94-generic` deb | `guest/build-guest.sh` downloads it (`EXTRA_DEB_URL`) | exFAT support is not in the minimal layer |
+| `squashfs-tools`, `initramfs-tools-core`, `7z`, `qemu-utils` | distribution packages | unpack the squashfs, rebuild the initrd, mount the image |
+| the patched vfio-user crate and a CH built against it | `[patch.crates-io]` in the CH tree points at the fix branch; the repository URL and revision are given in the artefact (withheld here for double-blind review) | the reset-capability fix lives in the VMM's dependency graph |
+| a USB stick with a 128 MiB `testfile.bin` | create it and record its MD5 in `guest/testfile.md5` | the workload; the device is `DEVICE=/dev/bus/usb/001/007` by default |
+| the raw logs | `/root/usb-runs`, `/root/usb-inject`, `/root/usb-replug` (archived under `../artifacts/`) | not in git; one run's packet capture is ~130 MB |
+
+Known gaps in the evidence: the 199.9 s deadlock measurement and the pre-fix
+five-run series predate the round-3 archiving harness, so their raw logs are not
+in `../artifacts/`; they are documented in `../docs/DEVLOG_cn.md` and
+`../docs/phase0-exp-b-ch-vfio-user-migration_cn.md`. Everything the paper's
+evaluation quotes is re-derivable from the archived round-3 runs.
 
 ## References
 

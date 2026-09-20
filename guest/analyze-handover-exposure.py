@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """Measure how exposed each run was to the hand-over interrupt race.
 
-The race the paper fixes needs two things to coincide: a transfer has to
-complete while the interrupter still holds the *departing* VMM's interrupt line,
-and the new line has to be installed afterwards. The window is:
+The race needs two things to coincide: a transfer completes while the
+interrupter still holds the *departing* VMM's interrupt line, and the new line is
+installed afterwards. The dangerous window is therefore
 
-    [destination registers its line]  ... [the worker installs it and kicks]
+    [the source VM stops executing]  ...  [the worker installs the new line]
 
-Everything signalled in that window has its completion event in the guest ring
-but its interrupt delivered to an event descriptor that belongs to a VMM which
-is about to exit; the kick is what makes the guest look at the ring again.
-
-The vfio-user server log records all three ingredients with microsecond
-timestamps, so the exposure can be counted per run instead of inferred:
+and *not* from the moment the migration is requested. Cloud Hypervisor does a
+pre-copy, so the guest keeps running for a few milliseconds after the request;
+counting completions from the request overstates the exposure. The VMM log
+records the ``Event: source = vm event = paused`` instant, and its uptime clock
+can be tied to the harness's migration epoch through the ``VmSendMigration`` API
+request line, so the window is anchored at the pause. Both bounds are printed:
+the pause-anchored count is the measurement, the request-anchored count is a
+strict upper bound.
 
   * "set IRQs: ... #fds: 1"                 - a client installs its line
-  * "interrupt line installed: re-raising"  - the worker has installed it
+  * "interrupt line installed"              - the worker has installed it
   * "Sent event: ..."                       - a completion was signalled
+  * "event = paused" / "VmSendMigration"    - the source stopped / was requested
 
-Usage: analyze-handover-exposure.py <usbvfiod.log> [...]
-       (or a directory of runs: pass the run directory and it reads usbvfiod.log)
+Usage: analyze-handover-exposure.py <usbvfiod.log|run-dir> [...]
 """
 from __future__ import annotations
 
+import datetime as dt
 import glob
 import os
 import re
@@ -35,10 +38,36 @@ REG = re.compile(r"set IRQs:.*#fds: 1")
 INSTALL = re.compile(r"interrupt line installed")
 SENT = re.compile(r"Sent event:")
 CONNECT = re.compile(r"Received client version")
+CH_REL = re.compile(r"^\S+:\s+([\d.]+)s:")
 
 
-def parse(path: str) -> tuple[int, int, float] | None:
-    """Return (exposed_events, total_events, window_ms) for one run."""
+def pause_offset_ms(run_dir: str) -> tuple[float, bool]:
+    """Milliseconds between the migration request and the source being paused.
+
+    Returns (offset_ms, measured). measured is False when the VMM log is missing
+    or does not contain the event, in which case the offset is 0 and the window
+    degenerates to the request-anchored (upper-bound) definition.
+    """
+    path = os.path.join(run_dir, "src.log")
+    if not os.path.exists(path):
+        return 0.0, False
+    req = paused = None
+    for line in open(path, errors="replace"):
+        m = CH_REL.match(line)
+        if not m:
+            continue
+        t = float(m.group(1))
+        if "API request event: VmSendMigration" in line:
+            req = t
+        elif "event = paused" in line:
+            paused = t
+    if req is None or paused is None:
+        return 0.0, False
+    return (paused - req) * 1000.0, True
+
+
+def parse(path: str) -> dict | None:
+    run_dir = os.path.dirname(path)
     regs: list[datetime] = []
     installs: list[datetime] = []
     sent: list[datetime] = []
@@ -61,35 +90,33 @@ def parse(path: str) -> tuple[int, int, float] | None:
                 installs.append(t)
             elif SENT.search(line):
                 sent.append(t)
-    # the *second* registration/installation is the hand-over (the first is the
-    # source registering at start-up)
+
     if len(connects) < 2 or len(installs) < 2:
         return None
-    # The dangerous window starts when the destination VMM has connected - from
-    # then on its hand-over is under way and the guest on the source side is
-    # paused - and ends when the worker actually installs the new line. Every
-    # completion signalled in between is written to the guest event ring but its
-    # interrupt goes to the departing VMM's descriptor.
-    # The window starts when the migration is requested: the source VMM pauses
-    # immediately afterwards and never resumes, so any completion signalled from
-    # then on has its interrupt delivered to a descriptor nobody will service.
-    # migration.epoch (host wall clock) is recorded by the harness next to the
-    # log; fall back to the destination's connect if it is missing.
-    rundir = os.path.dirname(path)
-    epoch_file = os.path.join(rundir, "migration.epoch")
-    t_start = connects[1]
+
+    epoch_file = os.path.join(run_dir, "migration.epoch")
+    t_req = connects[1]
     if os.path.exists(epoch_file):
-        try:
-            txt = open(epoch_file).read().strip()
-            if txt:
-                e = float(txt)
-                t_start = datetime.fromtimestamp(e, timezone.utc).replace(tzinfo=None)
-        except (OSError, ValueError):
-            pass
+        txt = open(epoch_file).read().strip()
+        if txt:
+            try:
+                t_req = datetime.fromtimestamp(float(txt), timezone.utc).replace(tzinfo=None)
+            except (OSError, ValueError):
+                pass
+
+    offset_ms, measured = pause_offset_ms(run_dir)
+    t_pause = t_req + dt.timedelta(milliseconds=offset_ms)
     t_install = installs[1]
-    exposed = sum(1 for t in sent if t_start <= t < t_install)
-    window_ms = (t_install - t_start).total_seconds() * 1000.0
-    return exposed, len(sent), window_ms
+
+    return {
+        "exposed": sum(1 for t in sent if t_pause <= t < t_install),
+        "exposed_req": sum(1 for t in sent if t_req <= t < t_install),
+        "total": len(sent),
+        "window_ms": (t_install - t_pause).total_seconds() * 1000.0,
+        "window_req_ms": (t_install - t_req).total_seconds() * 1000.0,
+        "pause_ms": offset_ms,
+        "pause_measured": measured,
+    }
 
 
 def main() -> int:
@@ -99,43 +126,44 @@ def main() -> int:
         return 2
     paths: list[str] = []
     for a in args:
-        if os.path.isdir(a):
+        if os.path.isdir(a) and not a.endswith(".log"):
             found = os.path.join(a, "usbvfiod.log")
             paths.append(found if os.path.exists(found) else "")
         else:
             paths.extend(sorted(glob.glob(a)))
-    paths = [p for p in paths if p]
+    paths = [p for p in paths if p and os.path.isfile(p)]
 
-    exposed_runs = 0
-    total_exposed = 0
     rows = []
     for p in paths:
-        r = parse(p)
+        rows.append((os.path.basename(os.path.dirname(p)), parse(p)))
+
+    print(f"{'run':<18}{'exposed':>9}{'events':>9}{'window_ms':>11}"
+          f"{'pause_ms':>10}{'upper':>7}{'upper_win':>11}")
+    for name, r in rows:
         if r is None:
-            rows.append((os.path.basename(os.path.dirname(p)), None, None, None))
+            print(f"{name:<18}{'n/a':>9}{'n/a':>9}{'n/a':>11}{'n/a':>10}{'n/a':>7}{'n/a':>11}")
             continue
-        exposed, total, window = r
-        if exposed:
-            exposed_runs += 1
-            total_exposed += exposed
-        rows.append((os.path.basename(os.path.dirname(p)), exposed, total, window))
+        tail = "" if r["pause_measured"] else "   (pause instant unavailable; >req)"
+        print(f"{name:<18}{r['exposed']:>9}{r['total']:>9}{r['window_ms']:>11.2f}"
+              f"{r['pause_ms']:>10.2f}{r['exposed_req']:>7}{r['window_req_ms']:>11.2f}{tail}")
 
-    print(f"{'run':<18}{'exposed':>9}{'events':>9}{'window_ms':>11}")
-    for name, exposed, total, window in rows:
-        if exposed is None:
-            print(f"{name:<18}{'n/a':>9}{'n/a':>9}{'n/a':>11}")
-        else:
-            print(f"{name:<18}{exposed:>9}{total:>9}{window:>11.2f}")
-
-    measured = [r for r in rows if r[1] is not None]
+    measured = [(n, r) for n, r in rows if r]
     if measured:
+        n_run = len(measured)
+        expos = sum(1 for _, r in measured if r["exposed"] > 0)
+        expos_req = sum(1 for _, r in measured if r["exposed_req"] > 0)
+        tot = sum(r["exposed"] for _, r in measured)
+        tot_req = sum(r["exposed_req"] for _, r in measured)
+        windows = [r["window_ms"] for _, r in measured]
         print()
-        print(f"runs measured               : {len(measured)}")
-        print(f"runs with exposure > 0      : {exposed_runs} "
-              f"({exposed_runs / len(measured):.0%})")
-        print(f"total exposed completions   : {total_exposed}")
-        worst = max(r[1] for r in measured)
-        print(f"worst-case exposed per run  : {worst}")
+        print(f"runs measured                     : {n_run}")
+        print(f"runs with exposure > 0 (pause)    : {expos} ({expos / n_run:.0%})")
+        print(f"completions at risk (pause)       : {tot}")
+        print(f"worst case per run (pause)        : {max(r['exposed'] for _, r in measured)}")
+        print(f"window ms (pause)                 : {min(windows):.2f} .. {max(windows):.2f}")
+        print("-- strict upper bounds (window anchored at the migration request) --")
+        print(f"runs with exposure > 0 (request)  : {expos_req} ({expos_req / n_run:.0%})")
+        print(f"completions at risk (request)     : {tot_req}")
     return 0
 
 

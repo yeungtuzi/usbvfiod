@@ -49,12 +49,17 @@ first show, by measurement, that migrating a VM with a vfio-user device
 \emph{deadlocks}: the destination blocks for $199.9$\,s inside the protocol
 version handshake because the vfio-user server accepts exactly one connection,
 which the source still holds. We then present a design that removes the
-deadlock without modifying virtual machine monitor (VMM) source code, although
-the VMM must be rebuilt against the fixed protocol crate: because the vfio-user
-handshake commands
+deadlock without modifying virtual machine monitor (VMM) source code: because
+the vfio-user handshake commands
 never touch the device backend, a wrapper that takes the backend lock
 \emph{per command} rather than per connection lets a second client connect
-while the first client is still connected. We identify and fix two defects that the hand-over exposes---a departing client tearing down the surviving client's interrupt line and DMA mappings, and completion interrupts lost inside the hand-over window---plus a reset-capability parsing bug in the protocol crate, and we describe a measurement harness that derives the verdict from the
+while the first client is still connected. A separate one-line bug in the
+protocol crate (an inverted reset-capability test) does require rebuilding the
+VMM against the fixed crate, because the crate is compiled into it. We identify
+and fix two defects that the hand-over exposes---a departing client tearing down
+the surviving client's interrupt line and DMA mappings, and completion
+interrupts lost inside the hand-over window---and we describe a measurement
+harness that derives the verdict from the
 guest's own log rather than from host-side observation.
 On a real 32\,GB exFAT stick passed through to an Ubuntu 22.04 guest, a
 128\,MiB file copy that spans the migration completes in \PassCount{} out of \TotalRuns{} runs with a measured downtime of \DowntimeMin--\DowntimeMax\,ms, byte-identical data and, at the USB
@@ -83,7 +88,8 @@ mechanism for host maintenance, load balancing and upgrades
 
 Memory and CPU state migrate well, and in-kernel VFIO devices can migrate when they implement the VFIO device
 migration interface \cite{vfiomigrationuapi}. USB
-devices are the difficult case \cite{kernelusb}. A guest talks to a USB device through a host
+devices are harder, because the host-side session is not part of the guest
+state. A guest talks to a USB device through a host
 controller; a passthrough implementation either emulates that controller and
 forwards individual transfers, or hands the whole controller to the guest. In
 the first case the host process that owns the physical device holds a session
@@ -202,7 +208,15 @@ the device to an unprivileged process, at the cost of an emulated controller in
 the transfer path. USB/IP \cite{hirofuchi2005usbip,kernelusbip} tunnels USB
 traffic over a network and is the natural answer for \emph{cross-host} device
 sharing, but the device remains attached to the source host and depends on an
-external transport. QEMU also provides USB to a guest, either by emulating devices or by attaching a physical one with \code{usb-host} \cite{qemuusb}; a passed-through USB host device cannot be interchanged during a migration \cite{libvirtformatdomain}, and USB redirection sends the traffic to a remote client with its own reconnection semantics \cite{usbredir} rather than preserving a host-side session.
+external transport. QEMU also provides USB to a guest, either by emulating
+devices or by attaching a physical one with \code{usb-host} \cite{qemuusb}.
+Libvirt does permit a domain with a USB host device to migrate
+\cite{libvirtmigrationsrc}---the device is detached on the source and re-attached
+on the destination, which libvirt's own comment calls ``migrated'' in quotation
+marks---but the host-side session is not preserved: the guest sees the device
+disappear and come back, which is exactly the naive alternative we measure in
+Section~\ref{sec:baseline}. USB redirection sends the traffic to a remote client
+\cite{usbredir} rather than preserving a host-side session.
 
 \begin{table}[t]
 \centering
@@ -216,7 +230,7 @@ Approach & Where device state lives & Consequence for migration \\
 \midrule
 Host \code{usbfs} process with an emulated xHCI in the guest \cite{usbvfiodrepo} & host process, not serialisable & session must survive; used here \\
 USB/IP \cite{hirofuchi2005usbip,kernelusbip} & source host, exported over a network & device stays on the source host; transport in the data path \\
-QEMU \code{usb-host} (physical passthrough) \cite{qemuusb,libvirtformatdomain} & device bound inside the VMM process & a passed-through USB host device cannot be interchanged during migration \cite{libvirtformatdomain} \\
+QEMU \code{usb-host} (physical passthrough) \cite{qemuusb,libvirtmigrationsrc} & device bound inside the VMM process & migration detaches and re-attaches the device; the guest sees it go away (Section~\ref{sec:baseline}) \\
 USB redirection (\code{usbredir}) \cite{usbredir} & device stays on the host, traffic goes to a remote client & the client reconnects the transport; no host session is preserved \\
 Kernel VFIO migration (non-USB) \cite{vfiomigrationuapi} & device-defined migration state & requires device support; not applicable to USB \\
 \bottomrule
@@ -304,7 +318,10 @@ device\_manager.rs:4749 Restoring virtio-pci \_vfio\_user0 resources
 
 \noindent and then makes no further progress. We waited 199.9\,s; there was no
 additional log output, no error, and the destination VMM's control API stopped answering.
-The source VM remained paused in the migrating state. Three observations pin
+The source VM remained paused in the migrating state. This measurement predates
+the fixes and comes from the standalone phase-0 experiment recorded in the
+project's development log (the round-3 batches of Section~\ref{sec:evaluation}
+measure the fixed system and do not contain it). Three observations pin
 the cause down: the server logged exactly \emph{one} client version handshake
 (the source's), a socket inspection showed \code{Recv-Q=1} on the listening
 socket, i.e.\ the destination's connection was established but never accepted,
@@ -457,14 +474,20 @@ previously unimplemented.
 %=====================================================================
 
 \subsection{usbvfiod}
-The change is confined to six files (about 380 added and 30 removed lines):
-a new \code{shared\_backend} module implementing the wrapper and the ownership
-rules; the accept-loop and lifecycle logic in \code{main.rs}; a
-\code{-{}-max-clients} option; the idempotent DMA bus; and the DMA, reset and
-interrupt-registration paths of the xHCI backend. The device emulation itself
-is untouched. Unit tests were extended from 109 to 112, and the project's
-strict lint configuration (\code{clippy} with all, nursery and cargo groups
-denied) passes.
+The multi-client change is confined to six files (381 added and 28 removed
+lines relative to the upstream revision): a new \code{shared\_backend} module
+implementing the wrapper and the ownership rules; the accept-loop and lifecycle
+logic in \code{main.rs}; a \code{-{}-max-clients} option; the idempotent DMA
+bus; and the DMA, reset and interrupt-registration paths of the xHCI backend.
+Two further changes are small but load-bearing: moving the hand-over kick into
+the interrupter worker, and the two debug-only injection hooks used in
+Section~\ref{sec:injection}. With those included the working tree differs from
+the upstream revision by seven files (516 added and 104 removed lines counting
+the one-line change to the USB backend, 515/103 excluding it). The
+device emulation itself is untouched. Unit tests grew by three (108 to 111 test
+attributes; \code{cargo test} reports 112 passing),
+and the project's strict lint configuration (\code{clippy} with all, nursery and
+cargo groups denied) passes.
 
 \subsection{Protocol crate}
 \label{sec:crate}
@@ -472,9 +495,22 @@ One behavioural bug in \code{vfio\_user}~0.1.5 had to be fixed for the reset
 semantics to be sane. The client parses the device's reset capability by
 comparing the masked flag word with \emph{inequality}, which inverts the result:
 a server that advertises ``not resettable'' is reported as resettable, so the
-VMM issues a device reset on every connection, including on the destination's connection during a migration. The fix is a one-line equality comparison. Because the
+VMM issues a device reset on every connection, including on the destination's
+connection during a migration. The fix is a one-line equality comparison. Because the
 crate is consumed by the VMM, the fix is applied to the VMM's dependency graph
 rather than to \code{usbvfiod}, which only uses the server side.
+
+We should be explicit about what this fix is and is not supported by. It is
+established by inspection of the published crate and by the behaviour of the
+unpatched build, in which CH's destination-side device creation fails and the
+experiment cannot run at all; that is why every measurement in this paper uses
+the patched build. It is \emph{not} isolated by an ablation arm: no log in the
+round-3 batches contains a \code{DeviceReset} command, because with the fix in
+place the reset is not offered and therefore never issued. A controlled
+comparison would require an arm that patches the parse to force a reset, which
+we did not run, so the claim we make is the narrow one---the parse is inverted
+and the build with it corrected is necessary to obtain the results here---rather
+than a measured statement about how much the reset alone costs.
 
 \subsection{Cloud Hypervisor integration}
 No CH source file was modified, but the result does require a \emph{custom CH
@@ -580,17 +616,27 @@ one-sided 95\,\% upper bound of $\FailUpper$ on the residual failure rate; the
 two-sided 95\,\% Clopper--Pearson interval is $[\CILow, \CIHigh]$. Against the
 pre-fix behaviour we observed---one failure in five runs---the comparison is
 still not statistically significant (Fisher exact, $p=\FisherPreFix$ against the
-five-run arm). Twenty successes bound the residual rate at roughly one in seven;
-they do not by themselves show \emph{which} fix carries the weight. That is what
-the negative controls and the injection suite of
+five-run arm). \TotalRuns{} successes bound the residual rate at roughly one in
+seven; they do not by themselves show \emph{which} fix carries the weight. That
+is what the negative controls and the injection suite of
 Sections~\ref{sec:arms}--\ref{sec:injection} are for, and
 Section~\ref{sec:threats} discusses what would be needed to narrow the bound
 further.
 
+\emph{What power do the comparisons have?} We report this rather than leaving it
+implicit. Taking the observed rates as the truth, the natural kick comparison
+(\KickOffPass/\KickOffRuns{} against \PassCount/\TotalRuns) has exact
+unconditional power $\PowerKickNatural$ at the sample sizes we used; reaching
+80\,\% power against the same effect would need about \NKickForEighty{} runs per
+arm, which is why we did not try to settle the kick question with more natural
+runs and instead used the injection suite. The 5\,s injection pair is discussed
+in Section~\ref{sec:injection}, including the power it does and does not have.
+
 \emph{Was the hand-over path actually exercised?} Yes, in every run, and the
 harness records it. Each run shows two interrupt-line installations (the source
-registering at start-up, the destination taking over during the migration;
-between \KickMin{} and \KickMax{} per run) and one stale teardown that the
+registering at start-up, the destination taking over during the migration) and
+between \KickMin{} and \KickMax{} re-raised interrupts on the new line, and one
+stale teardown that the
 server refused (between \StaleMin{} and \StaleMax{} per run, logged as
 \code{ignoring IRQ disable from stale vfio-user client}). Without that refusal
 the destination would have been left with a dummy interrupt line, which is the
@@ -598,22 +644,30 @@ failure mode we measured before the guard existed. The counts come from the
 server log of each run, which is archived with the raw data.
 
 The downtime figures are also less precise than their range suggests: the median
-is \DowntimeMedian\,ms but the bootstrap 95\,\% interval for the median already
-spans \DowntimeMin--\DowntimeMax\,ms. The \TotalRuns{} values are not unimodal:
+is \DowntimeMedian\,ms but the bootstrap 95\,\% interval for the median is
+$[\DowntimeMedianCILow,\DowntimeMedianCIHigh]$\,ms, against an observed range of
+\DowntimeMin--\DowntimeMax\,ms. The \TotalRuns{} values are not unimodal:
 eleven runs give 4--6\,ms, eight give 15--21\,ms and one gives 10\,ms, and the
 groups alternate rather than drift (runs 1--2 give 18 and 19\,ms, runs 3--4 give
-5 and 6\,ms, runs 5--6 give 17 and 15\,ms). A cause that switches between one run
-and the next, rather than changing over the session, is consistent with the four
-co-resident VMs of Section~\ref{sec:setup} stealing CPU during the stop-and-copy
-phase; it is not a property of the USB path, which is idle during the switchover.
+5 and 6\,ms, runs 5--6 give 17 and 15\,ms). We cannot attribute this to the
+co-resident VMs of Section~\ref{sec:setup} as we first assumed: joining the
+archived host-load samples to each run's migration instant gives a slightly
+\emph{negative} correlation between the one-minute load average and downtime
+($r=-0.38$ for the acceptance arm; the high-downtime runs average a lower load
+than the low-downtime ones), which points more to the switchover cost depending
+on the device and queue state than to host CPU. The one-minute load average is
+also too coarse to resolve a few-millisecond stop-and-copy phase, so we report
+the pattern and the failed hypothesis rather than a cause. It is anyway not a
+property of the USB path, which is idle during the switchover.
 Copy duration varied between \CopyMin\,s and \CopyMax\,s; the no-migration
 control (\ControlRuns{} runs, median \ControlCopyMedian\,s) shows the same
 spread, so we do not attribute that variation to the migration.
 
 \begin{table}[t]
 \centering
-\caption{Acceptance runs (post-fix). ``Spans'' means the copy window contains
-the migration instant; ``enums'' counts guest enumerations after the migration uptime.}
+\caption{Acceptance runs (post-fix; source: \code{results-debug.csv}, one row
+per run). ``Spans'' means the copy window contains the whole migration;
+``enums'' counts guest enumerations after the migration uptime.}
 \label{tab:results}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
@@ -627,7 +681,8 @@ Run & Downtime (ms) & Copy (s) & Spans & MD5 / enums \\
 \begin{figure}[t]
 \centering
 \input{figures/downtime.tex}
-\caption{Measured downtime of the \TotalRuns{} acceptance runs. The goal of
+\caption{Measured downtime of the \TotalRuns{} acceptance runs
+(source: \code{data/runs.dat}, from \code{results-debug.csv}). The goal of
 $\le 2000$\,ms is far above the plotted range.}
 \label{fig:downtime}
 \end{figure}
@@ -640,8 +695,10 @@ Two of them bound our claims from opposite sides.
 \emph{No migration.} The \ControlRuns{} control runs copy the same file on the
 same guest without migrating. All complete with matching checksums, so the
 workload by itself is sound and the copy-duration spread is not caused by the
-migration. These runs deliberately have no downtime figure: with no migration
-there is no stop-and-copy phase to measure.
+migration. Because there is no migration, these runs are judged on the digest
+alone: the span, enumeration and downtime criteria do not apply, and the arm
+cannot rule out a guest-visible disturbance that leaves the final digest intact.
+These runs deliberately have no downtime figure either.
 
 \emph{Kick disabled.} The \KickOffRuns{} runs use the acceptance build with the
 hand-over interrupt suppressed by a debug-only environment switch. This is the
@@ -649,8 +706,10 @@ arm that decides whether the kick earns its place: if these runs failed at the
 rate suggested by the exposure measurement, the kick would be clearly
 load-bearing; if they all passed, it would be defensive decoration. The outcome
 is in between---\KickOffPass/\KickOffRuns{} pass, one run stalls at a fixed byte
-count with no re-enumeration and no I/O error, which is the lost-completion
-signature---and on this sample alone the difference from the acceptance arm is
+count with no re-enumeration; its guest console shows no error until the block
+layer's command timeout fires about 30\,s later, and the copy never reports
+completion, which is the lost-completion signature---and on this sample alone the
+difference from the acceptance arm is
 not significant (Fisher exact, $p=\FisherKick$). The reason is structural rather
 than statistical: a missed completion is only fatal when it is the last one
 outstanding (Section~\ref{sec:exposure}), so an arm that leaves the window to
@@ -666,9 +725,12 @@ the argument. All \ReleasePass{}/\ReleaseRuns{} pass.
 
 \begin{table}[t]
 \centering
-\caption{Comparison arms. ``Pass'' counts runs meeting the verdict of
-Section~\ref{sec:evaluation}. Downtime is only defined for the migrating arms;
-the control has no switchover.}
+\caption{Comparison arms (source: \code{results-<tag>.csv} of each arm).
+``Pass'' counts runs meeting the verdict of Section~\ref{sec:evaluation} for the
+migrating arms; the no-migration control has no migration to span and no
+migration-uptime cutoff, so it is judged on the copy digest alone and its 8/8 is
+a checksum check rather than the full verdict. Downtime is only defined for the
+migrating arms.}
 \label{tab:arms}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
@@ -692,16 +754,16 @@ In all \ReplugRuns{} baseline runs the copy failed. The guest's own kernel log
 records \code{usb 1-1: USB disconnect, device number 2} at the detach moment,
 followed by up to \ReplugIOErrMax{} \code{blk\_update\_request: I/O error} lines
 for reads that were in flight on \code{sda}; \code{dd} returned non-zero in
-\ReplugRuns{} of \ReplugRuns{} runs and the digest of the partial file matched
-the source in \ReplugDigestMatch{} runs. No re-enumeration appears, because the
+every one of the \ReplugRuns{} runs and the digest of the partial file matched
+the source in \ReplugDigestMatch{} of them. No re-enumeration appears, because the
 copy had already aborted before the re-attach could bring the device back: the
 run is over from the guest's point of view the moment the device disappears.
 
 That is the cost the design avoids, and it is the same class of event as the one
 Section~\ref{sec:problem} attributes to tearing the session down---but here the
-guest sees it directly. It also shows why "detach and re-attach" is not an
-acceptable implementation of the same-host hand-over: it does not disturb the
-guest, it fails the transfer.
+guest sees it directly. It also shows why ``detach and re-attach'' is not an
+acceptable implementation of the same-host hand-over: it does not merely disturb
+the guest, it fails the transfer.
 
 \subsection{Timeline of a representative run}
 Figure~\ref{fig:copy} shows the guest's copy progress for run \ProgressRun{} of
@@ -715,7 +777,8 @@ migration.
 \begin{figure}[t]
 \centering
 \input{figures/copy_progress.tex}
-\caption{Guest copy progress in acceptance run \ProgressRun{} (128\,MiB). The
+\caption{Guest copy progress in acceptance run \ProgressRun{} (128\,MiB;
+source: the \code{copied=} field of the guest's own heartbeat). The
 migration is requested at $t=\ProgressMigPoint$\,s, with
 $\ProgressMigMiB$\,MiB copied, and the copy completes at
 $t=\ProgressCopyDuration$\,s with status~0: the transfer continues across the
@@ -748,12 +811,16 @@ transfers stop at the hand-over and do not recover within the observed window; w
 \label{sec:exposure}
 The hand-over fix only matters if the race it addresses actually occurs, so we
 measured its exposure instead of inferring it. Two things have to coincide: a
-transfer must complete after the migration has been requested---from that point
-the source VMM is paused and will never service another interrupt---and before
-the interrupter has installed the destination's line. The server log records
-every completion and every line installation with microsecond timestamps, so the
-width of that window and the number of completions inside it can be counted per
-run.
+transfer must complete while the source VMM will never service another
+interrupt, and before the interrupter has installed the destination's line. The
+server log records every completion and every line installation with microsecond
+timestamps, and the VMM log records the instant at which it paused the source
+(which is a few milliseconds \emph{after} the migration is requested, because CH
+pre-copies memory while the guest is still running). Anchoring the start of the
+window at the pause therefore measures the race; anchoring it at the request
+overstates it, because completions signalled before the pause are serviced
+normally. We report the pause-anchored count as the measurement and the
+request-anchored count as a strict upper bound.
 
 The window was \ExposureWindowMin--\ExposureWindowMax\,ms wide, and
 \ExposureRuns{} of the \ExposureMeasured{} acceptance runs had at least one
@@ -761,6 +828,11 @@ completion inside it: \ExposureCompletions{} completions in total, at most
 \ExposureWorst{} in a single run. For each of those completions the event is in
 the guest's event ring but the interrupt went to the departing VMM's descriptor,
 so the guest was not told about it. The exposure rate is \ExposureRate\,\%.
+Counting from the request instead would give \ExposureUpperRuns{} of
+\ExposureMeasured{} runs and \ExposureUpperCompletions{} completions
+(\ExposureUpperRate\,\%); we use the smaller number because it is the one the
+timestamps support, and the difference is itself informative about how much of
+the pre-copy window is still live.
 
 Whether such a missed interrupt is fatal depends on whether it is the
 \emph{last} outstanding completion. The stick is a USB~2.0 Bulk-Only-Transport
@@ -777,7 +849,7 @@ Table~\ref{tab:arms} is a weak test on its own: it can only fail in the fraction
 of runs where the missed completion happens to be the last one. The injection
 suite of Section~\ref{sec:injection} makes that condition explicit.
 
-\subsection{Deterministic hand-over injection}
+\subsection{Fault injection at the hand-over}
 \label{sec:injection}
 The exposure measurement shows that the race happens on its own; it does not by
 itself show that the two hand-over fixes are what make the system survive it. To
@@ -790,18 +862,30 @@ second disables the ownership guard.
 
 The placement of the delay is the point. While \code{SetIrqs} sleeps, the
 interrupter worker keeps draining completion events onto the departing client's
-line---the window the kick exists to cover---so the number of completions at risk
-grows with the delay. Sleeping in the worker instead would push those events
-behind the line-swap message and \emph{shrink} the exposure rather than enlarge
-it. Table~\ref{tab:injection} gives the outcome; the VMM-side effect of the
-delay is directly visible as downtime (the 5\,s arms report
-$\approx$5\,s).
+line---the window the kick exists to cover---and the transfer queue empties, so
+that the completion which lands in the window is the last one outstanding. The
+\emph{number} of completions at risk does not grow with the delay: it saturates
+at the queue depth (0--4 naturally, 1--3 at 500\,ms, 1--4 at 5\,s), because once
+the queue is empty there is nothing left to complete. What the delay changes is
+whether a \emph{further} completion follows the lost one. Sleeping in the worker
+instead would push events behind the line-swap message and \emph{shrink} the
+exposure rather than enlarge it. Two caveats about the hook's scope: it is not
+restricted to the hand-over, so it also delays the source's own registration at
+start-up (visible in the server log as a 500\,ms or 5\,s ``TEST HOOK'' line at
+boot), and the sleep happens while the shared backend lock is held. Both are
+irrelevant to the A/B contrast, which compares the same binary with the same
+hook enabled and only the kick switched, but they are part of what the arm
+measures. Table~\ref{tab:injection} gives the outcome; the VMM-side effect of
+the delay is directly visible as downtime (the 5\,s arms report
+$\approx$5\,s, and they are judged with the downtime budget raised to 12\,s
+precisely because the injected delay \emph{is} the downtime there).
 
 \begin{table}[t]
 \centering
-\caption{Fault-injection arms (debug build). ``Expected'' is what the mechanism
-predicts; the last column is observed. The hooks are inert when unset, so all
-rows run the same binary.}
+\caption{Fault-injection arms (debug build; source: \code{results-*.csv} from
+\code{guest/injection-suite.sh}). ``Expected'' is what the mechanism predicts;
+the last column is observed. The hooks are inert when unset, so all rows run the
+same binary. These are mechanism tests, not acceptance runs.}
 \label{tab:injection}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
@@ -823,18 +907,35 @@ $p=\FisherGuard$), \code{dd} returns non-zero and the guest kernel logs a 36\,s
 teardown has replaced the destination's interrupt line with a dummy, so the
 guest's commands never complete normally.
 
-Third, the kick is what makes the hand-over robust across the \emph{size} of the
-window, and a long window makes its absence deterministic. With a 500\,ms window
-the kick-enabled arm still passes \InjWindowPass/\InjWindowN, while removing the
-kick passes \InjWindowLossPass/\InjWindowLossN---not zero, because a 500\,ms
-window does not always drain the transfer queue and the guest can still recover
-on the next completion, exactly as in the acceptance runs. Once the window is
-long enough to drain the queue, the distinction is absolute: with a 5\,s window
-the kick-enabled arm passes \InjWinLongOnPass/\InjWinLongOnN{} and the
-kick-disabled arm passes \InjWinLongOffPass/\InjWinLongOffN. In the failing
-runs the copy stops at a fixed byte count and the guest sends no further
-completion until a SCSI timeout expires, i.e.\ the observed failure is the
-mechanism the kick prevents, not a generic timeout.
+Third, the kick is what makes the hand-over survive a window that is wide enough
+to matter. With a 500\,ms window the kick-enabled arm passes
+\InjWindowPass/\InjWindowN{} and the kick-disabled arm passes
+\InjWindowLossPass/\InjWindowLossN{} ($p=\FisherWindow$). With a 5\,s window the
+contrast is sharper still: \InjWinLongOnPass/\InjWinLongOnN{} against
+\InjWinLongOffPass/\InjWinLongOffN{} ($p=\FisherWinLong$). In every failing run
+the copy stops at a fixed byte count and the guest sends no further completion
+until a SCSI timeout expires, i.e.\ the observed failure is the mechanism the
+kick prevents, not a generic timeout. Note that the kick-off arms are not
+\emph{deterministically} fatal even at 5\,s---two of eight runs recovered---which
+is consistent with the account in Section~\ref{sec:exposure}: a wide window
+drains the queue and makes it likely, but not certain, that the lost completion
+is the last one outstanding.
+
+Two honesty notes on how the 5\,s pair came about. First, it is a \emph{post hoc}
+extension: the suite was designed with four arms and predicted that the 500\,ms
+window without the kick would fail. At the original five runs that prediction
+looked wrong (4/5 passed); after extending the arm to ten runs the effect is
+clear (\InjWindowLossPass/\InjWindowLossN), which is itself an illustration of
+why small arms mislead. We added the 5\,s pair only after that, extended it to a
+fixed eight runs per arm rather than stopping when it looked good, and report it
+as exploratory rather than confirmatory. At eight runs per arm, with a
+deliberately imperfect effect (5\,\% failure with the kick, 80\,\% without) the
+arm has power $\PowerWinLong$; $\NPowerWinLong$ runs per arm would be needed for
+80\,\% power against that effect, so the arm is adequately powered for a large
+effect and not for a small one. Second, the ownership hook disables both halves
+of the guard, including the DMA-unmap half that our workload does not otherwise
+exercise, so the arm demonstrates the guard as a whole rather than the two
+halves separately.
 
 One caveat is worth stating: the injection arms are mechanism tests, not
 acceptance runs. They hold the workload fixed and change only the server's
@@ -844,8 +945,9 @@ mechanism}; they do not measure how often the mechanism decides the outcome in
 production.
 
 \subsection{Defects found}
-Table~\ref{tab:defects} summarises the four defects that had to be fixed. Three
-are deterministic: the single-accept server blocks the destination in the
+Table~\ref{tab:defects} lists the four things that had to be fixed: the
+single-accept limitation itself and the three defects it exposed. Three are
+deterministic: the single-accept server blocks the destination in the
 handshake on every run, the inverted reset-capability parse makes every
 connection reset the device, and---as the injection of Section~\ref{sec:injection}
 shows---disabling the ownership guard makes the copy fail in every run. Only the
@@ -889,7 +991,13 @@ I/O}, and we do not claim to have tested duplication. The enumeration and
 reset criteria are now derived from the guest's own kernel log and are counted
 relative to the guest's uptime at the migration instant
 (Section~\ref{sec:implementation}), which removes an earlier threshold artefact
-in our harness, but they still rely on the kernel printing a message.
+in our harness, but they still rely on the kernel printing a message. It should
+also be said that in this dataset they never decided a verdict on their own:
+every failing run already failed the span or digest criterion, and the stalled
+runs have no dmesg section at all, which the verdict treats as a failure rather
+than as ``nothing happened''. The independent discriminating power of the two
+kernel-log criteria is therefore demonstrated by construction (they fail
+closed), not by a run they happened to catch.
 
 \emph{Internal.} The host was loaded by four other VMs; a host-load sample is
 archived with each batch, but it is not synchronised to individual runs. Run
@@ -901,9 +1009,13 @@ Section~\ref{sec:injection} is designed to be immune to it: it forces the
 hand-over condition inside a single run and compares presence and absence of the
 fix within one build, so its conclusions do not depend on cross-arm timing. The
 server was a debug build with verbose logging and packet capture enabled, which
-is why the release arm exists. The migration instant used for the ``spans'' test
-is the instant the migration was \emph{requested} on the host, converted through
-heartbeat pairs rather than through a verified clock offset. The destination of
+is why the release arm exists. The migration and pause instants used for the
+``spans'' test are host-clock times; the guest's copy timestamps are compared
+against them assuming the two clocks agree, and that assumption is not verified:
+the heartbeat pairs check that the guest clock runs at the same rate, not that
+its offset is zero. The exposure in the data is small---the nearest enumeration
+or reset event is at least 6.9\,s from the cutoff in every migrating run, and the
+span margin is about 7\,s---but the offset itself is untested. The destination of
 the copy was a file on the host-backed guest disk, so host page-cache writeback
 is in the loop.
 
@@ -911,12 +1023,21 @@ is in the loop.
 Transport device on one controller, one guest kernel, one workload size, and
 same-host \code{memfds} migration only. A USB~3.0/UAS device with several
 in-flight commands would exercise the hand-over differently, and the slow
-$\sim$2--6\,MiB/s transfer rate of the stick used here makes a completion less
+transfer of the stick used here (128\,MiB in \CopyMin--\CopyMax\,s, roughly
+4--10\,MiB/s) makes a completion less
 likely to land inside the hand-over window than it would be on faster hardware.
 
 \emph{Statistical.} $n=\TotalRuns{}$ in the acceptance arm and $n=5$ for the
-pre-fix rate, so the confidence intervals are wide; the power of each comparison
-is discussed in Sections~\ref{sec:results} and~\ref{sec:injection}.
+pre-fix rate, so the confidence intervals are wide. The natural kick comparison
+has power $\PowerKickNatural$ and would need about $\NKickForEighty$ runs per
+arm to reach 80\,\% at the observed effect; the 5\,s injection pair reaches
+$p=\FisherWinLong$ at $\InjWinLongOnN$/arm but has power $\PowerWinLong$ against
+an imperfect effect. Section~\ref{sec:results} and Section~\ref{sec:injection}
+give the full statement, including that the 5\,s pair was added after the
+500\,ms arm contradicted its prediction and is therefore exploratory.
+The pre-fix five-run series is described in the development log; its raw logs
+predate the archiving harness and are not part of the attached evidence, so the
+pre-fix comparison should be read as qualitative.
 
 \section{Discussion and Limitations}
 \label{sec:discussion}

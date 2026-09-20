@@ -20,7 +20,7 @@
 
 **假设**（若不成立需先确认）：
 1. Guest 为 Linux（xHCI + usb-storage，systemd）。
-2. 允许修改 Cloud Hypervisor（已 fork `yeungtuzi/cloud-hypervisor`）与 `vfio-user` crate。
+2. 允许修改 Cloud Hypervisor（已 fork `<fork-owner>/cloud-hypervisor`）与 `vfio-user` crate。
 3. 物理设备**不**在迁移过程中被拔出；不使用宿主键鼠接收器做测试设备。
 4. 同主机迁移使用 `memory_mode=memfds`（主计划已定，且对本方案是关键前提）。CH 文档（`docs/live_migration.md:337-342`）明确：`memfds` 通过 UNIX socket 传递 Guest 内存的 **backing file descriptor**（要求内存区为 shared/hugepage 后端），即源/目标 **mmap 同一份共享内存**——这是 §5 不变量 2 的依据。
 

@@ -1,7 +1,7 @@
 # PR: serve several vfio-user clients so a device survives a live migration
 
 Target: `cyberus-technology/usbvfiod` (main)
-Branch: `yeungtuzi:pr/multi-client`
+Branch: `<fork-owner>:pr/multi-client`
 
 ## Problem
 

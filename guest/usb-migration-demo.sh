@@ -234,11 +234,15 @@ echo
 # re-creates the serial device and resets the guest TTY.
 chmod +x "$DIR/verdict.py"
 DOWNTIME_MS=$(grep -aoE 'downtime of [0-9]+ms' "$RUN/src.log" | grep -aoE '[0-9]+' | head -1)
+# Pass the downtime through unchanged (possibly empty). Defaulting it to 0 here
+# made a missing "downtime of Nms" line look like a perfect 0 ms run, so the
+# budget criterion could never fail for the one reason it exists to catch.
 "$DIR/verdict.py" --guest-log "$GLOG" \
   --expected-md5 "$(awk '{print $1}' "$DIR/testfile.md5")" \
   --migration-epoch "$MIGRATION_EPOCH" \
   --migration-done "${MIGRATION_DONE:-}" \
-  --downtime-ms "${DOWNTIME_MS:-0}" \
+  --src-log "$RUN/src.log" \
+  --downtime-ms "$DOWNTIME_MS" \
   --max-downtime-ms "${MAX_DOWNTIME_MS:-2000}"
 RC=$?
 echo "============================================"

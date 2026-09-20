@@ -28,10 +28,20 @@ EXTRA_ENV="${EXTRA_ENV:-}"
 CSV="$RUNROOT/results-$TAG.csv"
 mkdir -p "$RUNROOT"
 
-echo "run,downtime_ms,copy_s,spans,md5,late_enum,late_err,kicks,stale,verdict,rc" > "$CSV"
+# APPEND=1 extends an existing batch instead of starting a new one: the CSV is
+# kept and the run indices continue after the last one. Used to grow an arm to a
+# pre-registered size after a first look at the data, without re-running it.
+APPEND="${APPEND:-0}"
+if [ "$APPEND" = "1" ] && [ -s "$CSV" ]; then
+  FIRST=$(( $(awk 'NR>1' "$CSV" | wc -l) + 1 ))
+else
+  echo "run,downtime_ms,copy_s,spans,md5,late_enum,late_err,kicks,stale,verdict,rc" > "$CSV"
+  FIRST=1
+fi
+LAST=$((FIRST + N - 1))
 
 pass=0
-for i in $(seq 1 "$N"); do
+for i in $(seq "$FIRST" "$LAST"); do
   out="$RUNROOT/$TAG-$i.log"
   (
     cd "$DIR" || exit 1

@@ -53,13 +53,13 @@ clean() {
   for f in /media/root/*/; do umount "$f" 2>/dev/null; done
 }
 
-arm() { # tag, extra env, expected verdict
-  local tag="$1" env="$2" expect="$3"
+arm() { # tag, extra env, expected verdict, [runs]
+  local tag="$1" env="$2" expect="$3" runs="${4:-$N}"
   echo
-  echo "########## ARM $tag (expected $expect) ##########"
+  echo "########## ARM $tag (expected $expect, $runs runs) ##########"
   clean
   TAG="$tag" RUNROOT="$RUNROOT" EXTRA_ENV="$env" \
-    "$DIR/acceptance-batch.sh" "$N" migrate
+    "$DIR/acceptance-batch.sh" "$runs" migrate
   local csv="$RUNROOT/results-$tag.csv"
   local pass fail
   pass=$(awk -F, 'NR>1 && $10=="PASS"' "$csv" | wc -l)
@@ -80,17 +80,22 @@ if ! strings "$USBVF" | grep -q USBVFIOD_INJECT_HANDOVER_DELAY_MS; then
   echo "warning: $USBVF does not contain the injection hooks (release build?)" >&2
 fi
 
-arm baseline      ""                                                          PASS
-arm window        "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500"                    PASS
-arm window-loss   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL
-arm guard-off     "USBVFIOD_DISABLE_OWNER_GUARD=1"                            FAIL
+arm baseline      ""                                                          PASS 5
+arm window        "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500"                    PASS 5
+# The 500 ms contrast is deliberately reported as non-deterministic and is given
+# more runs than the others so its failure rate is not estimated from a handful.
+arm window-loss   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL 8
+arm guard-off     "USBVFIOD_DISABLE_OWNER_GUARD=1"                            FAIL 5
 # A 500 ms window is not always enough to make the missing kick fatal: the guest
 # can recover if the completion it lost was not the last one outstanding. A 5 s
 # window drains the transfer queue, so the lost completion *is* the last one.
 # MAX_DOWNTIME_MS has to be raised because the injected delay is what the VMM
 # reports as downtime; the acceptance budget does not apply to these arms.
-arm winlong-on    "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000" PASS
-arm winlong-off   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL
+# 8 runs per arm is the pre-registered size: with a perfect split that is the
+# first n at which Fisher's exact two-sided p is below 0.05 (n=4 is already
+# significant at 0.029, but 8 also gives power against an imperfect effect).
+arm winlong-on    "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000" PASS 8
+arm winlong-off   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=5000 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL 8
 
 echo
 echo "================ INJECTION SUITE SUMMARY ================"

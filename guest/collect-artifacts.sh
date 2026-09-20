@@ -30,6 +30,18 @@ for d in "$SRC"/*/; do
 done
 echo "copied $n run directories"
 
+# Batch-level files as well: the per-arm CSVs (results-<tag>.csv, summary.csv),
+# the harness stdout logs (<tag>-<n>.log) and any arm-specific CSV. Without these
+# the attachment cannot regenerate paper/data/results.tex with update-results.py
+# --batch, which is the whole point of shipping it.
+m=0
+while IFS= read -r f; do
+  cp -f "$f" "$DEST/" && m=$((m+1))
+done < <(find "$SRC" -maxdepth 1 -type f \
+           \( -name 'results-*.csv' -o -name 'summary.csv' -o -name '*.log' \
+              -o -name 'replug.csv' \) 2>/dev/null)
+echo "copied $m batch-level files (CSVs / harness logs)"
+
 # per-file checksums of the text evidence (pcaps are checksummed too, but the
 # manifest keeps the sizes so a reader can see what is large)
 (
@@ -44,64 +56,8 @@ python3 "$(dirname "$0")/analyze-handover-exposure.py" "$DEST"/*/usbvfiod.log \
   > "$DEST/handover-exposure.txt" 2>/dev/null || true
 echo "wrote handover-exposure.txt"
 
-# manifest: metrics from verdict.py plus the artefact inventory
-python3 - "$DEST" <<'PY'
-import os, re, sys, glob, hashlib
-dest = sys.argv[1]
-rows = []
-for d in sorted(glob.glob(os.path.join(dest, "*/"))):
-    run = os.path.basename(d.rstrip("/"))
-    g = os.path.join(d, "guest-demo.log")
-    text = open(g, errors="replace").read() if os.path.exists(g) else ""
-    c = os.path.join(d, "console.log")
-    ctext = open(c, errors="replace").read() if os.path.exists(c) else ""
-    def find(pat, t=text, g=1):
-        m = re.search(pat, t, re.M)
-        return m.group(g) if m else ""
-    size = sum(os.path.getsize(f) for f in glob.glob(os.path.join(d, "*")) if os.path.isfile(f))
-    rows.append({
-        "run": run,
-        "verdict": find(r"^VERDICT\s+:\s+(\w+)"),
-        "down_ms": (re.search(r"downtime of (\d+)ms", ctext) or [None, ""])[1] if re.search(r"downtime of (\d+)ms", ctext) else "",
-        "copy_s": find(r"^copy duration\s+:\s+([\d.]+)"),
-        "spans": find(r"^spans migration\s+:\s+(\w+)"),
-        "md5": find(r"^md5 verdict\s+:\s+(\S+)"),
-        "late_enum": find(r"^enumerations after migration\s+:\s+(-?\d+)"),
-        "late_err": find(r"^reset/error lines after migr\.\s*:\s+(-?\d+)"),
-        "kicks": find(r"^interrupt lines installed\s+:\s+(\d+)"),
-        "stale": find(r"^stale teardowns ignored\s+:\s+(\d+)"),
-        "size_kb": f"{size//1024}",
-    })
+# manifest: per-run metrics re-derived from the archived run directories
+# themselves, using the same verdict code as the paper (guest/make-manifest.py).
+python3 "$(dirname "$0")/make-manifest.py" "$DEST"
 
-with open(os.path.join(dest, "MANIFEST.md"), "w") as fh:
-    fh.write("# Raw run artefacts\n\n")
-    fh.write(f"{len(rows)} runs, copied verbatim from the harness. Every file is listed in\n")
-    fh.write("`SHA256SUMS`; the metrics below are re-derived here from the guest log and\n")
-    fh.write("the CH log so they can be cross-checked against the paper.\n\n")
-    cols = ["run", "verdict", "down_ms", "copy_s", "spans", "md5", "late_enum",
-            "late_err", "kicks", "stale", "size_kb"]
-    fh.write("| " + " | ".join(cols) + " |\n")
-    fh.write("|" + "---|" * len(cols) + "\n")
-    for r in rows:
-        fh.write("| " + " | ".join(str(r[c]) for c in cols) + " |\n")
-    fh.write("\n## Files per run\n\n")
-    fh.write("| file | what it is |\n|---|---|\n")
-    for f, desc in [
-        ("guest-demo.log", "the guest's own log: copy markers, md5 of source and copy, heartbeats, and a dmesg/lsusb dump taken after the copy"),
-        ("console.log", "serial console capture through a FIFO (best effort; the destination resets the guest TTY)"),
-        ("console.clean", "the same, with ANSI escapes stripped and CR turned into LF"),
-        ("src.log", "source Cloud Hypervisor log (`-v`), incl. the `Migration completed ... downtime` line"),
-        ("dst.log", "destination Cloud Hypervisor log (`-v`)"),
-        ("usbvfiod.log", "vfio-user server log (`-v`): handshakes, DMA maps, IRQ registrations, stale-teardown decisions"),
-        ("usb.pcap", "USB packet capture at the server (Linux USB link type); ~130 MB per 128 MiB copy"),
-        ("migration.epoch", "wall-clock epoch at which send-migration was issued"),
-        ("send.log / receive.log", "ch-remote output"),
-        ("guest-copy.stat", "size of the copied file as seen in the guest"),
-    ]:
-        fh.write(f"| `{f}` | {desc} |\n")
-    fh.write("\n## Reproducing the verdict\n\n")
-    fh.write("```console\n$ guest/verdict.py --guest-log <run>/guest-demo.log \\\n")
-    fh.write("      --expected-md5 $(cat guest/testfile.md5 | cut -d' ' -f1) --migration-epoch <run>/migration.epoch\n```\n")
-print("wrote MANIFEST.md")
-PY
 du -sh "$DEST"
