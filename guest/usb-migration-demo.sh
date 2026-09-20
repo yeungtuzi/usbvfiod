@@ -174,8 +174,14 @@ else
 fi
 
 echo "--- guest-side USB disturbances (console) ---"
-ENUM=$(grep -ac 'new high-speed USB device\|new full-speed USB device' "$CLEAN")
-echo "enumeration events   : $ENUM (expected: 1)"
+# The xHCI driver resets its controller during probe, so the device is
+# enumerated once at boot; only enumerations after boot would indicate a
+# re-enumeration caused by the migration.
+ENUM_TIMES=$(grep -aoE '\[[[:space:]]*[0-9]+\.[0-9]+\] usb [0-9-]+: new (high|full)-speed USB device' "$CLEAN" \
+  | sed 's/^\[ *//; s/\].*//')
+echo "enumeration times    : $(echo "$ENUM_TIMES" | tr '\n' ' ')(boot enumeration is expected)"
+LATE=$(echo "$ENUM_TIMES" | awk '$1 > 30' | wc -l)
+echo "enumerations >30s    : $LATE (expected: 0 = no re-enumeration after boot)"
 grep -aiE 'xhci_hcd.*not responding|usb [0-9-]+: reset|device descriptor read|device not accepting|usb-storage.*error|Input/output error' \
   "$CLEAN" | head -5 || echo "(no resets / no I/O errors)"
 echo "============================================"
