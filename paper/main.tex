@@ -966,7 +966,7 @@ Defect & Symptom & Fix \\
 \midrule
 single-accept server & destination blocks 199.9\,s in the handshake & per-command lock, multi-client accept \\
 stale teardown & guest I/O times out and the copy fails after migration & interrupt-ownership rule \\
-lost hand-over interrupt & copy stalls with no error (intermittent) & re-raise one interrupt on registration \\
+lost hand-over interrupt & copy stalls at a fixed byte count; first error only after the command timeout & re-raise one interrupt on registration \\
 inverted reset-capability parse (crate) & every connection issues a device reset & equality test instead of inequality \\
 \bottomrule
 \end{tabular}
