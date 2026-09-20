@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+from decimal import Decimal, ROUND_HALF_UP
 import os
 import re
 import statistics
@@ -207,8 +208,14 @@ class Arm:
         return f"{min(self.nums('downtime_ms')):.0f}" if self.nums("downtime_ms") else "?"
 
     def med(self, key: str, fmt: str = "{:.1f}") -> str:
+        # statistics.median returns the exact mean of the two middle values, which
+        # for 26.05 is 26.049999999999997 in binary; format() then truncates to
+        # 26.0 where conventional rounding gives 26.1. Round half up.
         v = self.nums(key)
-        return fmt.format(statistics.median(v)) if v else "?"
+        if not v:
+            return "?"
+        m = statistics.median(v)
+        return fmt.format(float(Decimal(str(round(m, 6))).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)))
 
     def hi(self, key: str, fmt: str = "{:.0f}") -> str:
         v = self.nums(key)
@@ -560,7 +567,7 @@ def main() -> int:
     for tag in ("baseline", "window", "window-loss", "winlong-on", "winlong-off",
                 "guard-off"):
         show(f"inject:{tag}", inj[tag])
-    print(f"  exposure (CH-clock lower / epoch / request upper): "
+    print(f"  exposure (CH-clock lower / harness epoch / raw epoch): "
           f"{sum(1 for r in rows_exp if r[0] > 0)}/{sum(1 for r in rows_exp if r[1] > 0)}/"
           f"{sum(1 for r in rows_exp if r[2] > 0)} of {len(rows_exp)} runs")
     return 0

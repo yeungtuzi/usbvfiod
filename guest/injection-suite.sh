@@ -6,7 +6,7 @@
 # The acceptance batch measures the *fixed* system and relies on the hand-over
 # race happening by chance (in the 20-run campaign the CH-clock-anchored window
 # was non-empty in 4/20 runs, 8/20 with the harness-epoch anchor and 11/20 with
-# the request anchor). That is enough to show the system works, but it is a weak way to
+# the raw harness epoch). That is enough to show the system works, but it is a weak way to
 # show *why* it works: a reviewer cannot tell whether the two hand-over fixes
 # carry the weight or whether the runs simply never hit the bad case.
 #

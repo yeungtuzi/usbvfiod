@@ -638,10 +638,10 @@ in Section~\ref{sec:injection}, including the power it does and does not have.
 \emph{Was the hand-over path actually exercised?} Yes, in every run, and the
 harness records it. Each run shows two interrupt-line installations (the source
 registering at start-up, the destination taking over during the migration) and
-one re-raised interrupt per line installation (\KickMin{} per run, the second
-of which is on the destination's hand-over line), and one
+one re-raised interrupt per line installation (the same count in every run,
+\KickMin{}, the second of which is on the destination's hand-over line), and one
 stale teardown that the
-server refused (exactly \StaleMin{} per run, logged as
+server refused (the same count in every run, \StaleMin{}, logged as
 \code{ignoring IRQ disable from stale vfio-user client}). Without that refusal
 the destination would have been left with a dummy interrupt line, which is the
 failure mode we measured before the guard existed. The counts come from the
@@ -655,8 +655,9 @@ eleven runs give 4--6\,ms, eight give 15--21\,ms and one gives 10\,ms, and the
 groups alternate rather than drift (runs 1--2 give 18 and 19\,ms, runs 3--4 give
 5 and 6\,ms, runs 5--6 give 17 and 15\,ms). We cannot attribute this to the
 co-resident VMs of Section~\ref{sec:setup} as we first assumed: joining the
-archived host-load samples to each run's migration instant gives a slightly
-\emph{negative} correlation between the one-minute load average and downtime
+archived host-load samples to each run (the last sample at or before the
+migration instant) gives a slightly \emph{negative} correlation between the
+one-minute load average and downtime
 ($r=-0.38$ for the acceptance arm; the high-downtime runs average a lower load
 than the low-downtime ones), which points more to the switchover cost depending
 on the device and queue state than to host CPU. The one-minute load average is

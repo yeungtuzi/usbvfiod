@@ -160,6 +160,14 @@ def main() -> int:
                              and args.migration_epoch <= args.migration_done < done)
         print(f"switchover inside copy: {'YES' if switchover_inside else 'NO'}")
         spans = spans and switchover_inside
+    else:
+        # Without either the VMM log or the send-migration return time there is
+        # no evidence about the switchover at all, so the "spans the whole
+        # migration" criterion cannot be evaluated. Fail closed: every shipped
+        # caller passes --src-log.
+        print("switchover inside copy: UNKNOWN (no --src-log and no --migration-done)")
+        failures.append("missing-switchover-instant")
+        spans = False
     print(f"spans migration      : {'YES' if spans else 'NO'}")
     if not spans:
         failures.append("copy-window-does-not-span-migration")
