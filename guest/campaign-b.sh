@@ -10,8 +10,11 @@
 #   bcd  8 no-migration control, 8 release-build migration, 8 kick-disabled
 #        negative control
 #   e    3 naive detach/re-attach baseline runs
-#   f    fault-injection suite (4 arms x 5 runs): hooks dormant, 500 ms window
-#        with kick, 500 ms window without kick, ownership guard disabled
+#   f    fault-injection suite (see injection-suite.sh for the per-arm sizes:
+#        hooks dormant, 500 ms window with/without kick, 5 s window with/without
+#        kick, ownership guard disabled). The extended sizes themselves were
+#        produced by extend-injection.sh after the first look at the data, which
+#        the paper discloses and labels exploratory.
 #
 # Everything lands in RUNROOT (on disk: /run is a 6.3 GB tmpfs and one run
 # including its packet capture is ~145 MB, so two campaigns do not fit).

@@ -49,19 +49,27 @@
 \newcommand{\PowerWinLong}{0.88}
 \newcommand{\NPowerWinLong}{8}
 
-% ---- hand-over exposure (per-run measurement) ----
-\newcommand{\ExposureWindowMin}{3.0}
-\newcommand{\ExposureWindowMax}{17.7}
-\newcommand{\ExposureRuns}{8}
-\newcommand{\ExposureMeasured}{20}
-\newcommand{\ExposureCompletions}{10}
-\newcommand{\ExposureWorst}{2}
-\newcommand{\ExposureRate}{40}
-
-% ---- exposure counted from the migration request (upper bound) ----
+% ---- hand-over exposure. lower = anchored on CH's own clock
+% (its Enabling/Disabling IRQ events tied to usbvfiod's wall clock);
+% epoch = anchored on the harness's migration.epoch; upper = anchored
+% on the migration request. truth is between lower and epoch.
+\newcommand{\ExposureWindowMin}{2.1}
+\newcommand{\ExposureWindowMax}{13.4}
+\newcommand{\ExposureRuns}{4}
+\newcommand{\ExposureCompletions}{4}
+\newcommand{\ExposureWorst}{1}
+\newcommand{\ExposureRate}{20}
+\newcommand{\ExposureEpochRuns}{8}
+\newcommand{\ExposureEpochCompletions}{10}
+\newcommand{\ExposureEpochWindowMin}{3.0}
+\newcommand{\ExposureEpochWindowMax}{17.7}
 \newcommand{\ExposureUpperRuns}{11}
 \newcommand{\ExposureUpperCompletions}{24}
 \newcommand{\ExposureUpperRate}{55}
+\newcommand{\ExposureUpperWindowMax}{23.9}
+\newcommand{\ExposureMeasured}{20}
+
+\newcommand{\SpanMarginMin}{9.50}
 
 % ---- fault injection arms ----
 \newcommand{\InjBaselinePass}{5}

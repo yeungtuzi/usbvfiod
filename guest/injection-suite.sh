@@ -4,8 +4,9 @@
 #   ./injection-suite.sh [N_PER_ARM]
 #
 # The acceptance batch measures the *fixed* system and relies on the hand-over
-# race happening by chance (in the 20-run campaign the window was non-empty in
-# 11/20 runs). That is enough to show the system works, but it is a weak way to
+# race happening by chance (in the 20-run campaign the CH-clock-anchored window
+# was non-empty in 4/20 runs, 8/20 with the harness-epoch anchor and 11/20 with
+# the request anchor). That is enough to show the system works, but it is a weak way to
 # show *why* it works: a reviewer cannot tell whether the two hand-over fixes
 # carry the weight or whether the runs simply never hit the bad case.
 #
@@ -84,7 +85,7 @@ arm baseline      ""                                                          PA
 arm window        "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500"                    PASS 5
 # The 500 ms contrast is deliberately reported as non-deterministic and is given
 # more runs than the others so its failure rate is not estimated from a handful.
-arm window-loss   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL 8
+arm window-loss   "USBVFIOD_INJECT_HANDOVER_DELAY_MS=500 MAX_DOWNTIME_MS=12000 USBVFIOD_DISABLE_IRQ_KICK=1" FAIL 10
 arm guard-off     "USBVFIOD_DISABLE_OWNER_GUARD=1"                            FAIL 5
 # A 500 ms window is not always enough to make the missing kick fatal: the guest
 # can recover if the completion it lost was not the last one outstanding. A 5 s

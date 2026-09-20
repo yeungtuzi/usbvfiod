@@ -384,41 +384,53 @@ def main() -> int:
             # Only the acceptance arm is reported; an archive's exposure file
             # also contains the control/release/kick-off arms, whose windows
             # would otherwise be pooled into the macros.
-            if len(parts) >= 4 and parts[1].isdigit() \
+            if len(parts) >= 8 and parts[1].isdigit() \
                     and parts[0].startswith(args.exposure_prefix):
                 try:
-                    rows_exp.append((int(parts[1]), float(parts[3])))
-                except ValueError:
+                    # columns: run lower epoch upper events win_lo win_ep win_up
+                    rows_exp.append((int(parts[1]), int(parts[2]), int(parts[3]),
+                                     float(parts[5]), float(parts[6]), float(parts[7])))
+                except (ValueError, IndexError):
                     pass
         if rows_exp:
-            windows = [w for _, w in rows_exp]
-            n_exp = sum(1 for e, _ in rows_exp if e > 0)
+            lowers = [r[0] for r in rows_exp]
+            epochs = [r[1] for r in rows_exp]
+            uppers = [r[2] for r in rows_exp]
+            win_lo = [r[3] for r in rows_exp]
+            win_ep = [r[4] for r in rows_exp]
+            win_up = [r[5] for r in rows_exp]
+
+            def cnt(vals: list[int]) -> tuple[int, int]:
+                return sum(1 for v in vals if v > 0), sum(vals)
+
+            lo_runs, lo_tot = cnt(lowers)
+            ep_runs, ep_tot = cnt(epochs)
+            up_runs, up_tot = cnt(uppers)
             L += [
-                "% ---- hand-over exposure (per-run measurement) ----",
-                f"\\newcommand{{\\ExposureWindowMin}}{{{min(windows):.1f}}}",
-                f"\\newcommand{{\\ExposureWindowMax}}{{{max(windows):.1f}}}",
-                f"\\newcommand{{\\ExposureRuns}}{{{n_exp}}}",
+                "% ---- hand-over exposure. lower = anchored on CH's own clock",
+                "% (its Enabling/Disabling IRQ events tied to usbvfiod's wall clock);",
+                "% epoch = anchored on the harness's migration.epoch; upper = anchored",
+                "% on the migration request. truth is between lower and epoch.",
+                f"\\newcommand{{\\ExposureWindowMin}}{{{min(win_lo):.1f}}}",
+                f"\\newcommand{{\\ExposureWindowMax}}{{{max(win_lo):.1f}}}",
+                f"\\newcommand{{\\ExposureRuns}}{{{lo_runs}}}",
+                f"\\newcommand{{\\ExposureCompletions}}{{{lo_tot}}}",
+                f"\\newcommand{{\\ExposureWorst}}{{{max(lowers)}}}",
+                f"\\newcommand{{\\ExposureRate}}{{{100.0 * lo_runs / len(rows_exp):.0f}}}",
+                f"\\newcommand{{\\ExposureEpochRuns}}{{{ep_runs}}}",
+                f"\\newcommand{{\\ExposureEpochCompletions}}{{{ep_tot}}}",
+                f"\\newcommand{{\\ExposureEpochWindowMin}}{{{min(win_ep):.1f}}}",
+                f"\\newcommand{{\\ExposureEpochWindowMax}}{{{max(win_ep):.1f}}}",
+                f"\\newcommand{{\\ExposureUpperRuns}}{{{up_runs}}}",
+                f"\\newcommand{{\\ExposureUpperCompletions}}{{{up_tot}}}",
+                f"\\newcommand{{\\ExposureUpperRate}}{{{100.0 * up_runs / len(rows_exp):.0f}}}",
+                f"\\newcommand{{\\ExposureUpperWindowMax}}{{{max(win_up):.1f}}}",
                 f"\\newcommand{{\\ExposureMeasured}}{{{len(rows_exp)}}}",
-                f"\\newcommand{{\\ExposureCompletions}}{{{sum(e for e, _ in rows_exp)}}}",
-                f"\\newcommand{{\\ExposureWorst}}{{{max(e for e, _ in rows_exp)}}}",
-                f"\\newcommand{{\\ExposureRate}}{{{100.0 * n_exp / len(rows_exp):.0f}}}",
                 "",
             ]
-            # The request-anchored counts are a strict upper bound: CH does a
-            # pre-copy, so the guest keeps running for a few ms after the
-            # request. Both are published so the reader can see the bound.
-            upper = open(args.exposure).read()
-            m = re.search(r"runs with exposure > 0 \(request\)\s*:\s*(\d+)", upper)
-            c = re.search(r"completions at risk \(request\)\s*:\s*(\d+)", upper)
-            if m and c:
-                L += [
-                    "% ---- exposure counted from the migration request (upper bound) ----",
-                    f"\\newcommand{{\\ExposureUpperRuns}}{{{m.group(1)}}}",
-                    f"\\newcommand{{\\ExposureUpperCompletions}}{{{c.group(1)}}}",
-                    f"\\newcommand{{\\ExposureUpperRate}}"
-                    f"{{{100.0 * int(m.group(1)) / len(rows_exp):.0f}}}",
-                    "",
-                ]
+            mm = re.search(r"min copy margin after switchover\s*:\s*([\d.]+)", open(args.exposure).read())
+            L.append(f"\\newcommand{{\\SpanMarginMin}}{{{mm.group(1) if mm else '?'}}}")
+            L.append("")
     else:
         need(False, f"no exposure file at {args.exposure}; exposure macros omitted")
 
@@ -544,8 +556,9 @@ def main() -> int:
     for tag in ("baseline", "window", "window-loss", "winlong-on", "winlong-off",
                 "guard-off"):
         show(f"inject:{tag}", inj[tag])
-    print(f"  exposure runs with window>0: "
-          f"{sum(1 for e, _ in rows_exp if e > 0)}/{len(rows_exp)}")
+    print(f"  exposure (CH-clock lower / epoch / request upper): "
+          f"{sum(1 for r in rows_exp if r[0] > 0)}/{sum(1 for r in rows_exp if r[1] > 0)}/"
+          f"{sum(1 for r in rows_exp if r[2] > 0)} of {len(rows_exp)} runs")
     return 0
 
 

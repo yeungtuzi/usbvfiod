@@ -1,30 +1,29 @@
-run                 exposed   events  window_ms  pause_ms  upper  upper_win
-debug-1                   1     7832      16.15      5.17      1      21.31
-debug-2                   1     7843      15.96      5.12      3      21.08
-debug-3                   0     7840       3.08      1.92      3       5.00
-debug-4                   1     7834       3.35      1.98      3       5.33
-debug-5                   0     7830      16.23      5.28      0      21.52
-debug-6                   0     7840      15.64      5.11      0      20.75
-debug-7                   1     7841       3.00      2.00      1       5.01
-debug-8                   0     7822       3.37      1.92      3       5.29
-debug-9                   2     7836      17.05      5.44      3      22.49
-debug-10                  0     7841       3.20      2.08      1       5.28
-debug-11                  0     7844       3.13      2.02      0       5.15
-debug-12                  0     7823       4.19      2.08      0       6.26
-debug-13                  0     7831      11.41      3.91      0      15.32
-debug-14                  0     7849      17.12      5.20      0      22.32
-debug-15                  0     7843       3.16      1.97      0       5.13
-debug-16                  0     7833       2.99      2.02      0       5.02
-debug-17                  1     7821       3.82      2.05      1       5.87
-debug-18                  1     7836      17.70      6.17      1      23.87
-debug-19                  2     7848      16.81      5.43      4      22.24
-debug-20                  0     7840       3.13      2.11      0       5.24
+run                 lower  epoch  upper  events   win_lo   win_ep   win_up  anchor
+debug-1                 1      1      1    7832    11.84    16.15    21.31  CH-clock
+debug-2                 0      1      3    7843    11.76    15.96    21.08  CH-clock
+debug-3                 0      0      3    7840     2.11     3.08     5.00  CH-clock
+debug-4                 0      1      3    7834     2.40     3.35     5.33  CH-clock
+debug-5                 0      0      0    7830    12.04    16.23    21.52  CH-clock
+debug-6                 0      0      0    7840    10.98    15.64    20.75  CH-clock
+debug-7                 1      1      1    7841     2.11     3.00     5.01  CH-clock
+debug-8                 0      0      3    7822     2.41     3.37     5.29  CH-clock
+debug-9                 0      2      3    7836    12.63    17.05    22.49  CH-clock
+debug-10                0      0      1    7841     2.31     3.20     5.28  CH-clock
+debug-11                0      0      0    7844     2.23     3.13     5.15  CH-clock
+debug-12                0      0      0    7823     3.27     4.19     6.26  CH-clock
+debug-13                0      0      0    7831     7.13    11.41    15.32  CH-clock
+debug-14                0      0      0    7849    12.88    17.12    22.32  CH-clock
+debug-15                0      0      0    7843     2.24     3.16     5.13  CH-clock
+debug-16                0      0      0    7833     2.12     2.99     5.02  CH-clock
+debug-17                1      1      1    7821     2.96     3.82     5.87  CH-clock
+debug-18                1      1      1    7836    13.36    17.70    23.87  CH-clock
+debug-19                0      2      4    7848    12.33    16.81    22.24  CH-clock
+debug-20                0      0      0    7840     2.21     3.13     5.24  CH-clock
 
-runs measured                     : 20
-runs with exposure > 0 (pause)    : 8 (40%)
-completions at risk (pause)       : 10
-worst case per run (pause)        : 2
-window ms (pause)                 : 2.99 .. 17.70
--- strict upper bounds (window anchored at the migration request) --
-runs with exposure > 0 (request)  : 11 (55%)
-completions at risk (request)     : 24
+runs measured                       : 20
+CH-clock anchor (lower bound)       : 4 runs (20%), 4 completions, window 2.11..13.36 ms
+harness-epoch anchor (upper bound)  : 8 runs (40%), 10 completions
+request anchor (strict upper bound) : 11 runs (55%), 24 completions
+min copy margin after switchover    : 9.50 s
+runs with a CH-clock anchor         : 20/20
+max spread between the two CH-anchor pairs: 0.19 ms

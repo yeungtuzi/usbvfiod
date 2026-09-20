@@ -475,16 +475,17 @@ previously unimplemented.
 %=====================================================================
 
 \subsection{usbvfiod}
-The multi-client change is confined to six files (381 added and 28 removed
-lines relative to the upstream revision): a new \code{shared\_backend} module
+The multi-client change is 381 added and 28 removed lines over six files in the
+pull-request branch (the hand-over fixes were reviewed separately): a new
+\code{shared\_backend} module
 implementing the wrapper and the ownership rules; the accept-loop and lifecycle
 logic in \code{main.rs}; a \code{-{}-max-clients} option; the idempotent DMA
 bus; and the DMA, reset and interrupt-registration paths of the xHCI backend.
 Two further changes are small but load-bearing: moving the hand-over kick into
 the interrupter worker, and the two debug-only injection hooks used in
-Section~\ref{sec:injection}. With those included the working tree differs from
-the upstream revision by seven files (516 added and 104 removed lines counting
-the one-line change to the USB backend, 515/103 excluding it). The
+Section~\ref{sec:injection}. The working tree as a whole differs from
+the upstream revision by seven files (516 added and 104 removed lines); six of
+those files, i.e.\ everything except the interrupter, are 483/103. The
 device emulation itself is untouched. Unit tests grew by three (108 to 111 test
 attributes; \code{cargo test} reports 112 passing),
 and the project's strict lint configuration (\code{clippy} with all, nursery and
@@ -578,7 +579,7 @@ a lead tuned for one lets the copy finish before the migration is even requested
 A run is successful only if
 all four of the following hold: the copy window strictly contains the
 \emph{whole} migration, from the request to the completion of the switchover
-(both recorded by the harness); the MD5 of the copied file equals the MD5 of
+(the request is recorded by the harness and the completion is taken from CH's own log); the MD5 of the copied file equals the MD5 of
 the source file on the stick; the guest shows no enumeration after the migration
 uptime; and no reset or I/O error appears. The MD5 comparison is made inside the
 guest against the stick itself, so it also verifies that the device remained
@@ -616,7 +617,7 @@ lower confidence bound of $\PassLowerOneSided$ on the pass probability and a
 one-sided 95\,\% upper bound of $\FailUpper$ on the residual failure rate; the
 two-sided 95\,\% Clopper--Pearson interval is $[\CILow, \CIHigh]$. Against the
 pre-fix behaviour we observed---one failure in five runs---the comparison is
-still not statistically significant (Fisher exact, $p=\FisherPreFix$ against the
+still not statistically significant (two-sided Fisher exact, $p=\FisherPreFix$ against the
 five-run arm). \TotalRuns{} successes bound the residual rate at roughly one in
 seven; they do not by themselves show \emph{which} fix carries the weight. That
 is what the negative controls and the injection suite of
@@ -636,7 +637,7 @@ in Section~\ref{sec:injection}, including the power it does and does not have.
 \emph{Was the hand-over path actually exercised?} Yes, in every run, and the
 harness records it. Each run shows two interrupt-line installations (the source
 registering at start-up, the destination taking over during the migration) and
-between \KickMin{} and \KickMax{} re-raised interrupts on the new line, and one
+exactly \KickMin{} re-raised interrupts on the new line, and one
 stale teardown that the
 server refused (between \StaleMin{} and \StaleMax{} per run, logged as
 \code{ignoring IRQ disable from stale vfio-user client}). Without that refusal
@@ -711,7 +712,7 @@ count with no re-enumeration; its guest console shows no error until the block
 layer's command timeout fires about 30\,s later, and the copy never reports
 completion, which is the lost-completion signature---and on this sample alone the
 difference from the acceptance arm is
-not significant (Fisher exact, $p=\FisherKick$). The reason is structural rather
+not significant (two-sided Fisher exact, $p=\FisherKick$). The reason is structural rather
 than statistical: a missed completion is only fatal when it is the last one
 outstanding (Section~\ref{sec:exposure}), so an arm that leaves the window to
 chance can only fail in the fraction of runs where that coincidence occurs.
@@ -815,25 +816,35 @@ measured its exposure instead of inferring it. Two things have to coincide: a
 transfer must complete while the source VMM will never service another
 interrupt, and before the interrupter has installed the destination's line. The
 server log records every completion and every line installation with microsecond
-timestamps, and the VMM log records the instant at which it paused the source
-(which is a few milliseconds \emph{after} the migration is requested, because CH
-pre-copies memory while the guest is still running). Anchoring the start of the
-window at the pause therefore measures the race; anchoring it at the request
-overstates it, because completions signalled before the pause are serviced
-normally. We report the pause-anchored count as the measurement and the
-request-anchored count as a strict upper bound.
+timestamps, but the start of the window is not directly observable: the harness
+records the migration epoch just before it launches \code{ch-remote}, CH
+pre-copies so the guest keeps running for a few milliseconds after the request,
+and the pause is logged on CH's own clock. We therefore report three anchors
+rather than one, because the answer depends on which is used.
 
-The window was \ExposureWindowMin--\ExposureWindowMax\,ms wide, and
-\ExposureRuns{} of the \ExposureMeasured{} acceptance runs had at least one
-completion inside it: \ExposureCompletions{} completions in total, at most
-\ExposureWorst{} in a single run. For each of those completions the event is in
-the guest's event ring but the interrupt went to the departing VMM's descriptor,
-so the guest was not told about it. The exposure rate is \ExposureRate\,\%.
-Counting from the request instead would give \ExposureUpperRuns{} of
-\ExposureMeasured{} runs and \ExposureUpperCompletions{} completions
-(\ExposureUpperRate\,\%); we use the smaller number because it is the one the
-timestamps support, and the difference is itself informative about how much of
-the pre-copy window is still live.
+The end of the window is the second interrupt-line installation, which is
+exact. For the start we cross-tie CH's uptime to wall clock within each run using
+two causally adjacent event pairs---CH's \code{Enabling IRQ} against usbvfiod's
+first \code{set IRQs}, and CH's \code{Disabling IRQ} against the
+\code{ignoring IRQ disable} line---which agree to within 0.2\,ms in every run.
+Anchoring the pause on CH's own clock gives the lower bound (\ExposureRuns{} of
+\ExposureMeasured{} runs, \ExposureCompletions{} completions, window
+\ExposureWindowMin--\ExposureWindowMax\,ms); anchoring it through the harness
+epoch gives \ExposureEpochRuns{} runs and \ExposureEpochCompletions{}
+completions (window \ExposureEpochWindowMin--\ExposureEpochWindowMax\,ms); and
+anchoring it at the migration request gives the strict upper bound of
+\ExposureUpperRuns{} runs and \ExposureUpperCompletions{} completions
+(\ExposureUpperRate\,\%, window up to \ExposureUpperWindowMax\,ms). All three are
+in the same range: the race occurs naturally in a minority-to-half of the
+acceptance runs, and every completion counted in the window is a transfer
+completion (the events are \code{Transfer} TRBs, not command or port events).
+For each of them the event is in the guest's event ring but the interrupt went
+to the departing VMM's descriptor, so the guest was not told about it. We quote
+the CH-clock lower bound as the headline and give the others so the reader can
+see the spread; the truth lies between the lower and the epoch anchor.
+The copy also continues for at least \SpanMarginMin\,s after the switchover
+completes in the acceptance arm, so the criterion that the copy spans the whole
+migration holds with a wide margin.
 
 Whether such a missed interrupt is fatal depends on whether it is the
 \emph{last} outstanding completion. The stick is a USB~2.0 Bulk-Only-Transport
@@ -902,7 +913,7 @@ Three things follow. First, the hooks do nothing when they are not enabled
 injections and not by the build. Second, the \emph{ownership guard is
 load-bearing and its absence is deterministically fatal}: with the guard
 disabled the copy fails in all \InjGuardN{} runs
-(\InjGuardPass/\InjGuardN{} pass; Fisher exact against the acceptance arm,
+(\InjGuardPass/\InjGuardN{} pass; two-sided Fisher exact against the acceptance arm,
 $p=\FisherGuard$), \code{dd} returns non-zero and the guest kernel logs a 36\,s
 \code{DID\_TIME\_OUT} followed by repeated I/O errors---the source VMM's
 teardown has replaced the destination's interrupt line with a dummy, so the
@@ -911,9 +922,9 @@ guest's commands never complete normally.
 Third, the kick is what makes the hand-over survive a window that is wide enough
 to matter. With a 500\,ms window the kick-enabled arm passes
 \InjWindowPass/\InjWindowN{} and the kick-disabled arm passes
-\InjWindowLossPass/\InjWindowLossN{} ($p=\FisherWindow$). With a 5\,s window the
+\InjWindowLossPass/\InjWindowLossN{} (two-sided Fisher exact, $p=\FisherWindow$). With a 5\,s window the
 contrast is sharper still: \InjWinLongOnPass/\InjWinLongOnN{} against
-\InjWinLongOffPass/\InjWinLongOffN{} ($p=\FisherWinLong$). In every failing run
+\InjWinLongOffPass/\InjWinLongOffN{} (two-sided Fisher exact, $p=\FisherWinLong$). In every failing run
 the copy stops at a fixed byte count and the guest sends no further completion
 until a SCSI timeout expires, i.e.\ the observed failure is the mechanism the
 kick prevents, not a generic timeout. Note that the kick-off arms are not
@@ -922,18 +933,23 @@ is consistent with the account in Section~\ref{sec:exposure}: a wide window
 drains the queue and makes it likely, but not certain, that the lost completion
 is the last one outstanding.
 
-Two honesty notes on how the 5\,s pair came about. First, it is a \emph{post hoc}
-extension: the suite was designed with four arms and predicted that the 500\,ms
-window without the kick would fail. At the original five runs that prediction
-looked wrong (4/5 passed); after extending the arm to ten runs the effect is
-clear (\InjWindowLossPass/\InjWindowLossN), which is itself an illustration of
-why small arms mislead. We added the 5\,s pair only after that, extended it to a
-fixed eight runs per arm rather than stopping when it looked good, and report it
-as exploratory rather than confirmatory. At eight runs per arm, with a
+Three honesty notes. First, both extensions are \emph{post hoc}: the suite was
+designed with four arms and predicted that the 500\,ms window without the kick
+would fail. At the original five runs that prediction looked wrong (4/5 passed);
+extending the arm to ten runs shows the effect (\InjWindowLossPass/\InjWindowLossN),
+which is itself an illustration of why small arms mislead. We added the 5\,s
+pair only after that, extended each arm to a fixed eight runs rather than
+stopping when it looked good, and report both as exploratory. Second, we test
+six contrasts (control, kick, window, winlong, guard, pre-fix), so a nominal
+$p=0.05$ is not the right yardstick for any single one. Under a Holm correction
+over those six, the guard ($p=\FisherGuard$) and the 5\,s pair
+($p=\FisherWinLong$) survive and the 500\,ms contrast ($p=\FisherWindow$) does
+not; we therefore treat the 5\,s result as the one that establishes the kick's
+role and the 500\,ms result as nominal only. At eight runs per arm, with a
 deliberately imperfect effect (5\,\% failure with the kick, 80\,\% without) the
-arm has power $\PowerWinLong$; $\NPowerWinLong$ runs per arm would be needed for
-80\,\% power against that effect, so the arm is adequately powered for a large
-effect and not for a small one. Second, the ownership hook disables both halves
+5\,s arm has power $\PowerWinLong$; $\NPowerWinLong$ runs per arm would be needed
+for 80\,\% power against that effect, so it is adequately powered for a large
+effect and not for a small one. Third, the ownership hook disables both halves
 of the guard, including the DMA-unmap half that our workload does not otherwise
 exercise, so the arm demonstrates the guard as a whole rather than the two
 halves separately.
@@ -947,13 +963,15 @@ production.
 
 \subsection{Defects found}
 Table~\ref{tab:defects} lists the four things that had to be fixed: the
-single-accept limitation itself and the three defects it exposed. Three are
-deterministic: the single-accept server blocks the destination in the
-handshake on every run, the inverted reset-capability parse makes every
-connection reset the device, and---as the injection of Section~\ref{sec:injection}
-shows---disabling the ownership guard makes the copy fail in every run. Only the
-lost hand-over interrupt is timing-dependent, and it is the one that had to be
-demonstrated by enlarging the window rather than by repeating natural runs.
+single-accept limitation itself and the three defects it exposed. Two are
+deterministic and measured: the single-accept server blocks the destination in
+the handshake on every run, and---as the injection of
+Section~\ref{sec:injection} shows---disabling the ownership guard makes the copy
+fail in every run. The inverted reset-capability parse is deterministic by
+inspection rather than by an ablation (Section~\ref{sec:crate}); the only
+defect that is timing-dependent is the lost hand-over interrupt, and it is the
+one that had to be demonstrated by enlarging the window rather than by repeating
+natural runs.
 
 \begin{table}[t]
 \centering
@@ -1065,7 +1083,7 @@ re-raise mechanism: the injected 5\,s-window experiment
 (Section~\ref{sec:injection}) shows that without that one re-raised interrupt the
 guest can wait indefinitely for a completion that has already been written to
 its event ring, and that with it the copy continues even when the window is
-three orders of magnitude wider than the natural one. What we cannot claim is
+two to three orders of magnitude wider than the natural one. What we cannot claim is
 that a transfer is never retried: an explicit quiesce would make the in-flight
 set empty by construction and remove the dependence on where in the command
 queue the hand-over lands.
@@ -1156,11 +1174,21 @@ repository location is omitted here for double-blind review. In outline:
         step-by-step narrated run);
   \item read the verdict, which is derived from the guest's own log as
         described in Section~\ref{sec:implementation};
-  \item reproduce the whole measurement set with \code{guest/campaign-b.sh all}
-        (acceptance, controls and the naive baseline) and
-        \code{guest/injection-suite.sh} (the fault-injection arms);
-  \item archive each batch with \code{guest/collect-artifacts.sh}, which writes
-        per-file SHA-256 checksums and a manifest next to the raw logs.
+  \item reproduce the acceptance, control, release and kick-off arms with
+        \code{guest/campaign-b.sh a} and \code{guest/campaign-b.sh bcd}; the naive
+        detach/re-attach baseline with \code{guest/phase-e-and-winlong.sh};
+  \item reproduce the fault-injection arms with \code{guest/injection-suite.sh}
+        and, for the extended sizes reported here,
+        \code{guest/extend-injection.sh} (which appends the runs that took the
+        500\,ms arm to ten and the 5\,s arms to eight, using the \code{APPEND}
+        mode of the batch driver);
+  \item re-judge any archived batch from its logs alone with
+        \code{guest/reverify-batch.py} (the verdicts in this paper were
+        recomputed this way after the criterion change, without re-running a
+        single VM);
+  \item archive each batch with \code{guest/collect-artifacts.sh}, which copies
+        the run directories and the batch-level CSVs and writes per-file SHA-256
+        checksums plus a manifest generated by \code{guest/make-manifest.py}.
 \end{enumerate}
 
 \bibliographystyle{IEEEtran}

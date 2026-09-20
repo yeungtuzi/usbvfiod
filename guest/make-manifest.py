@@ -69,9 +69,15 @@ def one(run_dir: str) -> dict:
     dst_digest = next((h for p, h in digests.items() if "testfile.copy" in p), "")
 
     if epoch and float(epoch) > 0:
+        # Pass the downtime through unchanged (empty -> fail closed) and let
+        # verdict.py take the completion instant from CH's own log, exactly as
+        # the harness does. Passing "0" here made a run whose CH log had no
+        # "downtime of Nms" line look like a perfect 0 ms run.
+        budget = "12000" if run.startswith(("winlong", "window-loss")) else "2000"
         cmd = [sys.executable, VERDICT, "--guest-log", gpath,
                "--expected-md5", EXPECTED, "--migration-epoch", epoch,
-               "--downtime-ms", down or "0", "--max-downtime-ms", "2000"]
+               "--src-log", os.path.join(run_dir, "src.log"),
+               "--downtime-ms", down, "--max-downtime-ms", budget]
         if done:
             cmd += ["--migration-done", done]
         out = subprocess.run(cmd, capture_output=True, text=True).stdout
@@ -132,7 +138,7 @@ def main() -> int:
             ("usbvfiod.log", "vfio-user server log (`-v`): handshakes, DMA maps, IRQ registrations, stale-teardown decisions, injected-hook warnings"),
             ("usb.pcap", "USB packet capture at the server (Linux USB link type); ~130 MB per 128 MiB copy"),
             ("migration.epoch", "wall-clock epoch at which send-migration was issued"),
-            ("migration.done", "wall-clock epoch at which send-migration returned (switchover complete)"),
+            ("migration.done", "wall-clock epoch at which send-migration returned; it is a few ms before CH logs the switchover as complete, so verdict.py prefers the completion instant it parses from src.log"),
             ("send.log / receive.log", "ch-remote output"),
             ("guest-copy.stat", "size of the copied file as seen in the guest"),
         ]:
@@ -141,8 +147,9 @@ def main() -> int:
         fh.write("$ guest/verdict.py --guest-log <run>/guest-demo.log \\\n")
         fh.write("    --expected-md5 \"$(cut -d' ' -f1 guest/testfile.md5)\" \\\n")
         fh.write("    --migration-epoch \"$(cat <run>/migration.epoch)\" \\\n")
-        fh.write("    --migration-done \"$(cat <run>/migration.done)\" \\\n")
-        fh.write("    --downtime-ms N --max-downtime-ms 2000\n```\n")
+        fh.write("    --src-log <run>/src.log \\\n")
+        fh.write("    --downtime-ms \"$(grep -aoE 'downtime of [0-9]+ms' <run>/src.log | grep -aoE '[0-9]+')\" \\\n")
+        fh.write("    --max-downtime-ms 2000\n```\n")
     print(f"wrote {os.path.join(dest, 'MANIFEST.md')}: "
           f"{sum(1 for r in rows if r['verdict'] == 'PASS')}/{len(rows)} PASS")
     return 0
