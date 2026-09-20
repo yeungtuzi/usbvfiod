@@ -17,7 +17,7 @@ set -u
 MODE="${1:-control}"
 CH="${CH:-/root/lvllm/cloud-hypervisor/target/release/cloud-hypervisor}"
 CHR="${CHR:-$(dirname "$CH")/ch-remote}"
-USBVF="${USBVF:-<repo>/target/debug/usbvfiod}"
+USBVF="${USBVF:-$(cd "$(dirname "$0")/../.." && pwd)/target/debug/usbvfiod}"
 IMG="${IMG:-/root/lvllm/images}"
 D="${D:-/run/ch-mig2-$MODE}"
 

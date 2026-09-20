@@ -72,7 +72,7 @@ To reproduce a verdict for any run:
 $ guest/verdict.py --guest-log <run>/guest-demo.log \
     --expected-md5 "$(cut -d' ' -f1 guest/testfile.md5)" \
     --migration-epoch "$(cat <run>/migration.epoch)" \
-    --migration-done "$(cat <run>/migration.done)" \
+    --src-log <run>/src.log \
     --downtime-ms <n> --max-downtime-ms 2000
 ```
 

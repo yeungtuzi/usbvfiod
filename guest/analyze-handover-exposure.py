@@ -18,7 +18,8 @@ Two anchors are computed and both are printed:
     sends the command, this anchor is marginally late and yields a lower bound.
   * harness-epoch anchor: `migration.epoch` plus CH's own request-to-pause delta.
     It is early by the same skew and yields an upper bound.
-  * the request anchor is printed as a strict upper bound.
+  * the raw harness epoch (recorded before ch-remote is launched) is printed as
+    a strict upper bound.
 
 Output columns (space separated, parsed by paper/update-results.py):
     run lower epoch upper events win_lower_ms win_epoch_ms win_req_ms anchor
@@ -193,7 +194,7 @@ def main() -> int:
         print(f"runs measured                       : {n_run}")
         print(f"CH-clock anchor (lower bound)       : {lo[0]} runs ({lo[0] / n_run:.0%}), {lo[1]} completions, window {min(wins):.2f}..{max(wins):.2f} ms")
         print(f"harness-epoch anchor (upper bound)  : {ep[0]} runs ({ep[0] / n_run:.0%}), {ep[1]} completions")
-        print(f"request anchor (strict upper bound) : {up[0]} runs ({up[0] / n_run:.0%}), {up[1]} completions")
+        print(f"raw harness epoch (strict upper)    : {up[0]} runs ({up[0] / n_run:.0%}), {up[1]} completions")
         margins = [r["margin_s"] for _, r in m if r.get("margin_s") is not None]
         if margins:
             print(f"min copy margin after switchover    : {min(margins):.2f} s")

@@ -23,7 +23,7 @@ debug-20                0      0      0    7840     2.21     3.13     5.24  CH-c
 runs measured                       : 20
 CH-clock anchor (lower bound)       : 4 runs (20%), 4 completions, window 2.11..13.36 ms
 harness-epoch anchor (upper bound)  : 8 runs (40%), 10 completions
-request anchor (strict upper bound) : 11 runs (55%), 24 completions
+raw harness epoch (strict upper)    : 11 runs (55%), 24 completions
 min copy margin after switchover    : 9.50 s
 runs with a CH-clock anchor         : 20/20
 max spread between the two CH-anchor pairs: 0.19 ms

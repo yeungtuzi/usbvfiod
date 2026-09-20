@@ -43,7 +43,7 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 N="${1:-5}"
-RUNROOT="${RUNROOT:-/run/usb-inject}"
+RUNROOT="${RUNROOT:-/root/usb-inject}"
 mkdir -p "$RUNROOT"
 
 clean() {

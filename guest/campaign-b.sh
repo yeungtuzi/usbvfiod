@@ -22,7 +22,8 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
 RUNROOT="${RUNROOT:-/root/usb-runs}"
-export PATH=/root/lvllm/.cargo/bin:$PATH CARGO_HOME=/root/lvllm/.cargo RUSTUP_HOME=/root/lvllm/.rustup
+export CARGO_HOME="${CARGO_HOME:-/root/lvllm/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-/root/lvllm/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
 
 mkdir -p "$RUNROOT"
 "$DIR/stop-demo.sh" >/dev/null 2>&1

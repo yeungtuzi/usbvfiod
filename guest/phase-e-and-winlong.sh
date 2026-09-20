@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH=/root/lvllm/.cargo/bin:$PATH CARGO_HOME=/root/lvllm/.cargo RUSTUP_HOME=/root/lvllm/.rustup
+export CARGO_HOME="${CARGO_HOME:-/root/lvllm/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-/root/lvllm/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
 echo "########## PHASE E: replug baseline (3 runs) ##########"
 rm -rf /root/usb-replug; mkdir -p /root/usb-replug
 for i in 1 2 3; do
