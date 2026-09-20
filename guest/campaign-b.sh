@@ -44,7 +44,7 @@ if [ "$do_bcd" = 1 ]; then
   TAG=control RUNROOT="$RUNROOT" "$DIR/acceptance-batch.sh" 8 control
 
   echo; echo "########## PHASE C: 8 release-build migration runs ##########"
-  TAG=release USBVF=/root/lvllm/usbvfiod/target/release/usbvfiod RUNROOT="$RUNROOT" \
+  TAG=release USBVF=<repo>/target/release/usbvfiod RUNROOT="$RUNROOT" \
     "$DIR/acceptance-batch.sh" 8 migrate
 
   echo; echo "########## PHASE D: 8 kick-disabled runs (negative control) ##########"
@@ -65,7 +65,7 @@ fi
 
 if [ "$do_f" = 1 ]; then
   echo; echo "########## PHASE F: fault-injection suite ##########"
-  RUNROOT=/root/usb-inject USBVF=/root/lvllm/usbvfiod/target/debug/usbvfiod \
+  RUNROOT=/root/usb-inject USBVF=<repo>/target/debug/usbvfiod \
     "$DIR/injection-suite.sh" 5
 fi
 

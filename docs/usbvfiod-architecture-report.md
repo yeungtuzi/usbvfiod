@@ -1,7 +1,7 @@
 # usbvfiod 技术架构与设计分析报告
 
 > 对象：`https://github.com/cyberus-technology/usbvfiod`
-> 本地独立克隆：`/home/user/lvllm/usbvfiod`（已移除 `origin` remote，与上游断开，作为独立项目）
+> 本地独立克隆：`<repo>`（已移除 `origin` remote，与上游断开，作为独立项目）
 > 版本：`v0.3.0`（`Cargo.toml`），HEAD `4d2c5af`
 > 说明：仓库内没有独立的 PDF“项目报告”；本报告的“报告”依据为 `README.md` 与 `docs/`（`overview.md`、`developers/architecture.md`、`developers/quick-start.md`、`users/basic.md`、`users/systemd.md`、`users/security.md`）以及全部源码。
 

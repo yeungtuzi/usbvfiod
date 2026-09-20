@@ -21,7 +21,7 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
 你是顶级系统会议（SOSP/OSDI/NSDI）的资深审稿人，评审一篇关于"USB 直通设备在虚拟机热迁移中存活"
 的系统论文。你以严格、只认证据、讨厌过度声明著称。你**没有**看过这篇论文的早期版本。
 
-仓库根目录：`/root/lvllm/usbvfiod`。请自行阅读（不要只依赖下面的摘要）：
+仓库根目录：`<repo>`。请自行阅读（不要只依赖下面的摘要）：
 
 - `paper/main.tex`（IEEEtran 会议格式，约 9–10 页）、`paper/main.pdf`
 - `paper/data/results.tex`（由脚本从原始 CSV 生成的全部数字宏）
@@ -83,7 +83,7 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
 你是实验方法学审稿人，专长是**测量效度与统计推断**。你的工作是找出"看起来是结论、其实是伪影"的地方。
 你**没有**看过这篇论文的早期版本。
 
-仓库根目录：`/root/lvllm/usbvfiod`。必读：
+仓库根目录：`<repo>`。必读：
 
 - `paper/main.tex` 的 Evaluation / Threats to validity / Discussion 各节
 - `paper/data/results.tex`（全部数字宏）与其生成脚本 `paper/update-results.py`
@@ -131,7 +131,7 @@ subagent(description="round-3 reviewer: systems", run_in_background=true,
 你是负责写作、引用规范与可复现工件的审稿人。你以"逐条 fetch 核实引用"和"数字必须能从数据复算"
 著称。你**没有**看过这篇论文的早期版本。
 
-仓库根目录：`/root/lvllm/usbvfiod`。必读：`paper/main.tex`、`paper/main.pdf`、`paper/refs.bib`、
+仓库根目录：`<repo>`。必读：`paper/main.tex`、`paper/main.pdf`、`paper/refs.bib`、
 `paper/main.bbl`、`paper/abstract_zh.tex`、`paper/README.md`、`docs/DEVLOG_cn.md`、
 `docs/review_report_cn.md`、`docs/demo-script_cn_en.md`、`artifacts/README.md`。
 

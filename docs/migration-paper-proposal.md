@@ -1,4 +1,4 @@
-# Ziyi Fu: Discuss for DA
+# Migration paper proposal: discussion notes
 
 # Abstract
 

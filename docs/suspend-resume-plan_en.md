@@ -4,10 +4,10 @@
 |---|---|
 | Status | Merged plan (pending review) |
 | Version | v2.1 (unified suspend/migration lifecycle) |
-| Sources merged | Source A: same-host suspend/resume requirements (R1–R5, frozen in v1.0); Source B: `docs/ziyi-fu-discuss-for-da.md` (Ziyi Fu migration thesis proposal) |
+| Sources merged | Source A: same-host suspend/resume requirements (R1–R5, frozen in v1.0); Source B: `docs/migration-paper-proposal.md` (migration thesis proposal) |
 | Scope | **Committed**: same-host suspend/resume, same-host snapshot/restore, **same-host live migration**, controller/agent restart; **feasibility study**: cross-host migration |
 | Target components | `usbvfiod`, new `usbdev-agent`, guest helper/driver, Cloud Hypervisor / rust-vmm integration where needed |
-| Related docs | `docs/developers/architecture.md`, `docs/users/systemd.md`, `docs/users/security.md`, `docs/ziyi-fu-discuss-for-da.md` |
+| Related docs | `docs/developers/architecture.md`, `docs/users/systemd.md`, `docs/users/security.md`, `docs/migration-paper-proposal.md` |
 
 ---
 

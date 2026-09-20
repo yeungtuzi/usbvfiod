@@ -3,7 +3,7 @@
 
 > 适用版本 / Applies to：usbvfiod（分支 `main`，含多客户端后端与两个交接修复）+ Cloud Hypervisor `v53.0-520` + 一键脚本 `guest/usb-migration-demo.sh`
 > 实测结论 / Measured result：**20/20 通过**，停机 **4–21 ms**（中位 6 ms），复制跨越迁移，md5 完全一致，迁移后**零重枚举、零复位、零 I/O 错误**。
-> 对照与注入 / Controls and injection：不迁移 8/8；release 构建 8/8（复制快约 4.5 倍）；关闭踢中断 7/8；朴素热拔插基线 0/3；故障注入「关闭归属守卫」0/5、「5 s 窗口关闭踢中断」0/3。详见 `paper/main.pdf` 与 `docs/DEVLOG_cn.md` D14。
+> 对照与注入 / Controls and injection：不迁移 8/8；release 构建 8/8（复制快约 4.5 倍）；关闭踢中断 7/8；朴素热拔插基线 0/3；故障注入「关闭归属守卫」0/5、「5 s 窗口关闭踢中断」2/8（8/8 对 2/8，$p=0.007$）。详见 `paper/main.pdf`、`docs/DEVLOG_cn.md` D15 与 `docs/review_report_cn.md` 第七部分。
 
 ---
 
@@ -22,7 +22,7 @@
 ```console
 $ lsusb | grep -i innostor                 # U 盘在位 / stick present
 $ ls -l /dev/kvm                           # KVM 可用 / KVM available
-$ cd /root/lvllm/usbvfiod/guest
+$ cd <repo>/guest
 $ ls -l rootfs.img initrd-custom.gz casper/vmlinuz    # 镜像就绪 / images ready
 $ cat testfile.md5                         # 期望校验值 / expected checksum
 ```
@@ -85,7 +85,7 @@ Both end with the same verdict table.
 
 **操作 / Action**
 ```console
-$ cd /root/lvllm/usbvfiod/guest && PAUSE=1 ./usb-migration-demo.sh
+$ cd <repo>/guest && PAUSE=1 ./usb-migration-demo.sh
 ```
 
 **讲解词 / Narration**
@@ -278,10 +278,10 @@ enumerations after migration : 0 (expected: 0 = no re-enumeration at/after the m
 
 ```console
 # 一键演示 / one-command
-cd /root/lvllm/usbvfiod/guest && ./usb-migration-demo.sh
+cd <repo>/guest && ./usb-migration-demo.sh
 
 # 交互讲解（每步等回车）/ narrated (Enter at each step)
-cd /root/lvllm/usbvfiod/guest && PAUSE=1 ./usb-migration-demo.sh
+cd <repo>/guest && PAUSE=1 ./usb-migration-demo.sh
 
 # 只看结论 / verdict only
 ./usb-migration-demo.sh | tail -20

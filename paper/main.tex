@@ -211,9 +211,10 @@ sharing, but the device remains attached to the source host and depends on an
 external transport. QEMU also provides USB to a guest, either by emulating
 devices or by attaching a physical one with \code{usb-host} \cite{qemuusb}.
 Libvirt does permit a domain with a USB host device to migrate
-\cite{libvirtmigrationsrc}---the device is detached on the source and re-attached
-on the destination, which libvirt's own comment calls ``migrated'' in quotation
-marks---but the host-side session is not preserved: the guest sees the device
+\cite{libvirtmigrationsrc}: its source comment calls the USB case ``migrated''
+in quotation marks, and QEMU's \code{usb-host} realises that by detaching the
+device on the source and re-attaching it on the destination. The host-side
+session is not preserved---the the host-side session is not preserved: the guest sees the device
 disappear and come back, which is exactly the naive alternative we measure in
 Section~\ref{sec:baseline}. USB redirection sends the traffic to a remote client
 \cite{usbredir} rather than preserving a host-side session.
@@ -689,7 +690,7 @@ $\le 2000$\,ms is far above the plotted range.}
 
 \subsection{Controls and negative controls}
 \label{sec:arms}
-Table~\ref{tab:arms} puts the acceptance arm beside the four comparison arms.
+Table~\ref{tab:arms} puts the acceptance arm beside three comparison arms (a fourth, the naive detach/re-attach baseline, is reported separately in Section~\ref{sec:baseline}).
 Two of them bound our claims from opposite sides.
 
 \emph{No migration.} The \ControlRuns{} control runs copy the same file on the
@@ -841,8 +842,8 @@ if the completion of the final outstanding command is the one that lands in the
 window, no further transfer is submitted and no later completion arrives to
 interrupt the guest and drain the ring: the copy stops at a fixed byte count,
 which is the stall we reproduced. If, on the other hand, more commands were still
-queued, the next completion interrupts the guest on the new line and it drains
-the ring, including the events it was never interrupted for, and the same
+queued, the next completion interrupts the guest on the new line. The guest then
+drains the ring, including the events it was never interrupted for, and the same
 exposure is harmless. That is why the defect is intermittent in the acceptance
 runs rather than deterministic---and why the \emph{kick-off} arm of
 Table~\ref{tab:arms} is a weak test on its own: it can only fail in the fraction

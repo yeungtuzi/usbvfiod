@@ -263,7 +263,11 @@ def main() -> int:
     )
 
     n, k = debug.n, debug.k
-    lo, hi = debug.ci()
+    if n == 0:
+        # No acceptance arm in --batch (e.g. the attachment is missing). Emit the
+        # ? placeholders the README promises instead of dividing by zero.
+        need(False, f"no acceptance arm in {args.batch}; emitting placeholders")
+    lo, hi = debug.ci() if n else (float("nan"), float("nan"))
     dt = debug.nums("downtime_ms")
     cp = debug.nums("copy_s")
     ks, st = debug.ints("kicks"), debug.ints("stale")
@@ -285,8 +289,8 @@ def main() -> int:
         f"\\newcommand{{\\CopyMax}}{{{debug.hi('copy_s', '{:.1f}')}}}",
         f"\\newcommand{{\\CILow}}{{{lo:.2f}}}",
         f"\\newcommand{{\\CIHigh}}{{{hi:.2f}}}",
-        f"\\newcommand{{\\FailUpper}}{{{k == n and f'{1 - 0.05 ** (1 / n):.2f}' or 'n/a'}}}",
-        f"\\newcommand{{\\PassLowerOneSided}}{{{k == n and f'{0.05 ** (1 / n):.2f}' or 'n/a'}}}",
+        f"\\newcommand{{\\FailUpper}}{{{f'{1 - 0.05 ** (1 / n):.2f}' if (n and k == n) else 'n/a'}}}",
+        f"\\newcommand{{\\PassLowerOneSided}}{{{f'{0.05 ** (1 / n):.2f}' if (n and k == n) else 'n/a'}}}",
         f"\\newcommand{{\\KickMin}}{{{min(ks) if ks else '?'}}}",
         f"\\newcommand{{\\KickMax}}{{{max(ks) if ks else '?'}}}",
         f"\\newcommand{{\\StaleMin}}{{{min(st) if st else '?'}}}",

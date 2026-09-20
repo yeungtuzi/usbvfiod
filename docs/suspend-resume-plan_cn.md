@@ -4,10 +4,10 @@
 |---|---|
 | 状态 | 合并版计划（待评审） |
 | 版本 | v2.1（统一次休眠/迁移生命周期） |
-| 合并来源 | 来源 A：本机休眠/唤醒需求（R1–R5，已在 v1.0 固化）；来源 B：`docs/ziyi-fu-discuss-for-da.md`（Ziyi Fu 迁移论文提案） |
+| 合并来源 | 来源 A：本机休眠/唤醒需求（R1–R5，已在 v1.0 固化）；来源 B：`docs/migration-paper-proposal.md`（迁移论文提案） |
 | 范围 | **已承诺**：本机休眠/唤醒、本机快照/恢复、**本机 live migration**、controller/agent 重启；**可行性研究**：跨主机迁移 |
 | 目标组件 | `usbvfiod`、新增 `usbdev-agent`、Guest helper/driver、必要时的 Cloud Hypervisor / rust-vmm 集成 |
-| 相关文档 | `docs/developers/architecture.md`、`docs/users/systemd.md`、`docs/users/security.md`、`docs/ziyi-fu-discuss-for-da.md` |
+| 相关文档 | `docs/developers/architecture.md`、`docs/users/systemd.md`、`docs/users/security.md`、`docs/migration-paper-proposal.md` |
 
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-DIR=/root/lvllm/usbvfiod/guest
+DIR=<repo>/guest
 export PATH=/root/lvllm/.cargo/bin:$PATH CARGO_HOME=/root/lvllm/.cargo RUSTUP_HOME=/root/lvllm/.rustup
 echo "########## PHASE E: replug baseline (3 runs) ##########"
 rm -rf /root/usb-replug; mkdir -p /root/usb-replug

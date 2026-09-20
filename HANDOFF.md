@@ -322,7 +322,7 @@ ch-remote --api-socket "$XDG_RUNTIME_DIR/ch1.sock" \
   - `docs/usbvfiod-architecture-report.md`
   - `docs/usb-vfiod-live-migration_cn.md` / `_en.md`
   - `docs/suspend-resume-plan_cn.md` / `_en.md`
-  - `docs/ziyi-fu-discuss-for-da.md`
+  - `docs/migration-paper-proposal.md`
   - `HANDOFF.md`（本文件）
 - 工作区里其它目录与文件（`Lvllm/`、`vllm-xiaotu-moe/`、`ShareGPT_*.json` 等）与本项目无关，**不要复制**（`ShareGPT_V3_unfiltered_cleaned_split.json` 有 640 MB）。
 - 复制到新机器后：`cd usbvfiod && git status`，确认 HEAD 为 `4d2c5af…`，再把未跟踪文件做一次本地提交：
