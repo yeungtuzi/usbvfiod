@@ -1,0 +1,28 @@
+# Two-phase hand-over, measured on the runs driven by the control socket.
+#
+# Source runs (raw artifacts on the host that produced them):
+#   teardown_ms  staging of the destination -> Cloud Hypervisor deactivating the
+#                source's device. Natural runs usb-v1 (8.3 ms) and usb-w1
+#                (3.7 ms); the larger value is used, it is the more generous one
+#                for the controller.
+#   window_*_ms  interval in which the destination runs with no interrupt line:
+#                source paused -> new line installed, over the natural runs
+#                usb-demo-t1 (18.7/23.1/28.5 ms), usb-f1 (19.2/23.7/29.4 ms) and
+#                usb-w1 (7.3/9.1/11.7 ms), from
+#                guest/analyze-handover-exposure.py. min = best lower bound,
+#                max = worst upper bound.
+#   exposed      transfer completions inside that window, worst anchor over the
+#                natural runs (the install-time kick covers them)
+#   commit_ms    staged -> committed, the run in which the controller's
+#                ready+commit won the race (usb-demo-t1)
+#   downtime_ms  reported downtime of the final-code natural run usb-w1
+#   reclaim_*    the failure runs (KILL_DST_ON_REGISTRATION, usb-f2/usb-v2):
+#                verifier output, re-enumerations and reset/IO error lines
+teardown_ms 8.3
+downtime_ms 8
+window_min_ms 7.3
+window_max_ms 29.4
+exposed 3
+commit_ms 23.9
+reclaim_enumerations 0
+reclaim_errors 0

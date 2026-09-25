@@ -977,3 +977,68 @@ status 查询会被同一次注册串行化，等它拿到状态时候选已经�
 目标端 guest 继续跑了 35 s 后 xHCI 报 `host not responding to stop endpoint`、
 `USB disconnect`、`blk_update_request: I/O error`，复制 `rc=1`、md5 不符。
 也就是说：**commit 是承重的**——两阶段交接不是"多此一举的仪式"，少了它目标端 guest 最终会坏。
+
+## D26. 真机收尾：一次由真机抓到的回归（已修）+ 最终 T1/T14 判定
+
+### D26.1 真机抓到的回归：候选的 DMA 覆盖不能看"注册那一刻的快照"
+
+我在 D25.5 给"提升候选"加了自动预检（候选必须已发布设备要用的全部内存），并在**注册时**把候选
+当时的 DMA 区间快照进 `Registration`。真机 T1 直接把这个实现打回：
+
+```
+07:44:42.147689  hand-over candidate: client 1 staged        ← 暂存（此刻候选还没 DmaMap）
+07:44:42.147991  dma_map … size = 2147483648                  ← 目标端 0.3 ms 后才发布内存
+07:44:42.155985  源端 set IRQs #fds: 0（deactivate）
+07:44:42.156372  WARN not promoting candidate 1: it failed the preflight
+07:44:42.156470  WARN the device is unowned (epoch 2)
+→ 目标端 guest 再也没有中断线：约 35 s 后 xHCI 报 not responding、USB disconnect、
+  blk_update_request: I/O error×9；`md5 verdict: MISMATCH`、`VERDICT: FAIL`
+```
+
+根因：**目标端 VMM 的 `DmaMap` 晚于它的 `SetIrqs`**（实测 0.06–0.3 ms），而"源端拆自己"发生在
+暂存后 3.7–8.3 ms，所以提升那一刻候选其实已经发布好内存了——是我的**快照**过期，不是候选不合格。
+
+修法：预检改为读**活的** `Ownership.mapped`（候选连接还活着，它的 map 就在那里），
+删掉 `Registration.ranges` 快照；并加回归测试
+`a_destination_that_publishes_memory_after_registering_is_still_usable`
+（注册→发布→owner 死亡→必须被提升并被 kick）。修复后同一条自然路径：
+
+```
+07:48:38.243094  hand-over candidate: client 1 staged
+07:48:38.243150  dma_map (目标端, +0.06 ms)
+07:48:38.246654  源端 set IRQs #fds: 0
+07:48:38.246784  promoted the staged candidate 1 (epoch 2) + kick
+→ Migration completed after 0.0s with a downtime of 8ms; md5 verdict: MATCH; VERDICT: PASS
+```
+
+教训（写进论文也写进这里）：**单元/合成测试覆盖不到 VMM 的真实命令顺序**；这条回归只有真机
+跑一遍才会暴露。合成测试里我按 `dma_map → set_irqs` 的"顺理成章"顺序写，正好把缺陷藏住了。
+
+### D26.2 最终判定（自然路径，最终代码）
+
+| 项目 | 值 | 来源 |
+|---|---|---|
+| T1 自然迁移 | **VERDICT PASS**，md5 MATCH，spans migration，0 重枚举，0 reset/IO 错误 | `usb-w1`（downtime 8 ms）/ `usb-demo-t1`（18 ms） |
+| 暴露窗口（paused → 新线安装） | 7.3–29.4 ms（自然 3 次：7.3/9.1/11.7、18.7/23.1/28.5、19.2/23.7/29.4） | `analyze-handover-exposure.py` |
+| 窗口内完成的传输数 | 0–3（安装时补发的 kick 覆盖） | 同上 |
+| 暂存 → 源端 deactivate | 3.7 ms（w1）/ 8.3 ms（v1） | usbvfiod 日志 |
+| 控制器 staged → committed | 23.9 ms（唯一一次赢得竞速的运行 `usb-demo-t1`） | `handover.{candidate,commit}` |
+| T14 目标端已注册后迁移失败 | **VERDICT PASS**：`rc=0`、md5 MATCH、copy continued after failure、0 重枚举、0 reset/IO | `usb-f2`、`usb-v2` |
+| 无人 commit 的负对照 | 目标端 guest 约 35 s 后失去 USB 栈（9 条 reset/IO 错误），md5 缺失 | `usb-demo-t3`（D25.7）、`usb-v1` |
+
+### D26.3 由数据推出来的、必须如实写进论文的结论
+
+1. **直接收益成立**：目标端注册不再夺线；预检不合格（缺 DMA/未 ready/超时/abort）时源端全程不动，
+   已用真机（T14）与无 guest 测试（9 个测试断言 eventfd kick）双向证明。
+2. **但控制器显式 commit 不在自然路径的关键路径上**：源端在暂存后 **3.7–8.3 ms** 就被 CH 自己
+   deactivate，而控制器的 `ready`+`commit` 需要**两次往返（实测 23.9 ms）**，所以自然路径上真正
+   闭合窗口的是**兜底提升**（owner 消失 + 候选通过自动预检 → 提升 + kick）。T1 的 PASS 主要来自这条路。
+3. **因此预检目前是"劝告性"的，不是"约束性"的**：CH 不会等控制器判断完再拆源端。要让
+   "缺东西就保持旧环境"成为**强制**语义，需要让**目标端注册的应答被挂住**，直到控制器决定
+   （commit 放行 / abort 或超时回错 → CH 设备激活失败 → 迁移失败 → 源端恢复）。
+   这正是本次实验里用来撑开窗口的注入钩子（`USBVFIOD_INJECT_STAGING_DELAY_MS`）所做的事，
+   把它从"测试钩子"提升为"机制"是下一步（需要：暂存时释放 ownership 锁、在条件变量上等决定、
+   决定后按 Ok/Err 回复）。已在设计文档与论文里据此改写声明，未声称超出数据的结论。
+4. **撤回一个更早的乐观推断**：D23 曾设想"控制器在 `migration-receive-started` 时 commit"，
+   实测表明该事件远早于切换点，且目标端设备激活时刻才出现候选；控制器的判定时刻必须由数据
+   决定（见第 2、3 点），而不是由事件名字推断。

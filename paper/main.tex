@@ -1061,9 +1061,17 @@ server promotes the staged candidate. Copy continuity is unchanged
 re-enumerations), and the exposure window - the interval in which the
 destination runs with no line installed - is \TwoPhaseWindowMin--%
 \TwoPhaseWindowMax\,ms, with \TwoPhaseExposed{} exposed transfer completions that
-the install-time kick covers. When the source's teardown is held open, the
-controller's \code{ready}+\code{commit} closes the window instead, in
-\TwoPhaseCommitMs\,ms.
+the install-time kick covers.
+
+The measurements also show where the controller's explicit \code{commit} sits in
+this VMM's flow. In the one run in which it won the race it closed the window
+\TwoPhaseCommitMs\,ms after the staging, but that takes two round trips
+(\code{ready}, then \code{commit}) while the source is torn down after
+\TwoPhaseTeardownMs\,ms, so the automatic fallback is what closes the natural
+case. Making the preflight \emph{binding} rather than advisory therefore needs
+the destination's registration reply to be held until the controller has decided,
+which is precisely the injection this experiment uses to hold the window open,
+and which we leave as the next step.
 
 \subsection{Defects found}
 Table~\ref{tab:defects} lists the four things that had to be fixed: the
