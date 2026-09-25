@@ -275,15 +275,29 @@ CH 有两条现成的输出通道：
 
 与迁移结果相关的**全部**事件与触发点（已核对源码）：
 
+下表**已按 E1 实测校正**（E1 见 `DEVLOG_cn.md` D24，原始日志 `/root/usb-e1/{s1,s2}`；
+带 ★ 的是 E1 实测新增/修正的项）：
+
 | 事件 | 来源 | 触发点 | 含义 | 控制器的动作 |
 |---|---|---|---|---|
-| `migration-started` | source | `vmm/src/lib.rs:1698` | 迁移开始 | 标记"迁移中" |
-| `pausing` / `paused` | source | `vmm/src/vm.rs:3275/3301` | 源端暂停（切换点） | 候选预检的最后窗口 |
-| `resuming` / `resumed` | source | `vmm/src/vm.rs:3306/3329`（由 `try_resume_vm_after_failed_migration` → `vm.resume()` 触发，`vmm/src/lib.rs:2143`） | **源端被恢复 = 迁移没成功（失败或取消）** | 已 commit → **reclaim**；未 commit → abort |
-| `migration-receive-started` | dest | `vmm/src/lib.rs:1179` | 目标端开始接收/接管 | 预检须在此前变绿，随后 `ready`+`commit` |
-| `migration-receive-finished` | dest | `vmm/src/lib.rs:3319` | **目标端接管成功** | 无需回滚（成功） |
+| `migration-starting` ★ | source | 实测 | 源端开始迁移 | 标记"迁移中" |
+| `migration-started` | source | `vmm/src/lib.rs:1698` | 迁移已启动 | 标记"迁移中" |
+| `pausing` / `paused` | source | `vmm/src/vm.rs:3275/3301` | **源端暂停（切换点）** | 候选预检的最后窗口；此后才允许 commit |
+| `snapshotting` / `snapshotted` ★ | source | 实测 | 设备/快照阶段 | 观测 |
+| **`migration-failed`** ★ | source | 实测（`vmm/src/lib.rs:2185` 分支） | **迁移失败/取消（最直接判据）** | 已 commit → **reclaim**；未 commit → abort |
+| `migration-finished` ★ | source | 实测（对应 `Migration completed`，`:1895`） | 源端侧成功 | 无需回滚 |
+| `resuming` / `resumed` | source **与** dest ★ | `vmm/src/vm.rs:3306/3329`（源端由 `try_resume_vm_after_failed_migration` → `vm.resume()` 触发，`lib.rs:2143`） | 该实例的 vCPU 被恢复；**必须按实例区分** | 源端出现 `resumed` ⇒ 失败 → reclaim/abort |
+| `migration-receive-starting` ★ | dest | 实测 | 目标端开始接收 | 预检须在此前变绿 |
+| `migration-receive-started` | dest | `vmm/src/lib.rs:1179` | 目标端接管开始 | `ready`+`commit` |
+| `migration-receive-finished` | dest | `vmm/src/lib.rs:3319` | **目标端接管成功** | 成功，无需回滚 |
 | `migration-receive-failed` | dest | `vmm/src/lib.rs:3322` | **目标端失败** | 未 commit → abort；已 commit → reclaim |
+| `restoring`/`restored`、`activated` ★ | dest | 实测 | 目标端设备恢复/激活 | 观测（候选注册就在这附近） |
 | `shutdown` | source | `vmm/src/lib.rs:2696` | 源端退出（成功迁移的正常路径） | 无需 reclaim |
+
+> **判据（按 E1 修正）**：主判据用**源端 `migration-failed`**（最直接）；
+> 辅以"源端 `paused` 之后出现 `resumed`"以及目标端 `migration-receive-failed`。
+> 成功判据用目标端 `migration-receive-finished`（或源端 `migration-finished`）。
+> `resuming/resumed` 两端都会发，所以必须订阅**两个实例**并分别归属事件来源。
 
 配套的日志行（可作为 JSON 通道不可用时的兜底）：
 成功 `Migration completed after ...`（`:1895`）；失败 `Migration failed: ...`（`:2185`）；
