@@ -173,16 +173,26 @@ impl Peer {
     /// destination maps the very same memory, which is why the ring stays valid
     /// across the hand-over.
     fn prepare(&mut self) {
-        let mut erst_entry = [0u8; 16];
-        erst_entry[0..8].copy_from_slice(&(GUEST_BASE + RING_OFFSET).to_le_bytes());
-        erst_entry[8..12].copy_from_slice(&RING_TRBS.to_le_bytes());
+        self.publish_memory();
+        self.configure_event_ring();
+    }
+
+    /// Publish this connection's guest memory to the device.
+    ///
+    /// Separate from [`Self::configure_event_ring`] because a real VMM does not
+    /// order the two against the interrupt registration: measured, Cloud
+    /// Hypervisor sends `SetIrqs` and its `DmaMap` 0.3 ms later, so a hand-over
+    /// must not depend on having seen the mapping already.
+    fn publish_memory(&mut self) {
         self.memory
-            .write_all_at(&erst_entry, ERST_OFFSET)
+            .write_all_at(&erst_entry(), ERST_OFFSET)
             .expect("write ERST entry");
         self.client
             .dma_map(0, GUEST_BASE, MEM_SIZE, self.memory.as_raw_fd())
             .expect("dma_map");
-        // ERSTSZ must be set before ERSTBA; the latter starts the event ring.
+    }
+
+    fn configure_event_ring(&mut self) {
         self.write32(ERSTSZ, 1);
         // A 64-bit register, but region writes are at most 32 bits wide, so the
         // high half stays zero and the window lives below 4 GiB.
@@ -264,6 +274,14 @@ impl Peer {
     fn disconnect(&self) {
         let _ = self.client.shutdown();
     }
+}
+
+/// The single event-ring segment table entry these tests use.
+fn erst_entry() -> [u8; 16] {
+    let mut entry = [0u8; 16];
+    entry[0..8].copy_from_slice(&(GUEST_BASE + RING_OFFSET).to_le_bytes());
+    entry[8..12].copy_from_slice(&RING_TRBS.to_le_bytes());
+    entry
 }
 
 /// Register a peer and learn its connection id from `role` in the status.
@@ -870,5 +888,50 @@ fn a_candidate_that_cannot_serve_is_not_promoted() {
         status(&server).epoch,
         boot_epoch + 2,
         "each ownership change moves the epoch"
+    );
+}
+
+#[test]
+fn a_destination_that_publishes_memory_after_registering_is_still_usable() {
+    // Measured on real VMs and the reason this test exists: the destination's
+    // `DmaMap` arrives *after* its `SetIrqs` (0.3 ms later, with the source still
+    // owning the device). A hand-over that evaluated the preflight against a
+    // snapshot taken at registration time refused the promotion, left the device
+    // unowned, and the destination guest lost its USB stack about 35 s later.
+    let server = Server::start("late-map", &[]);
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let mut late = Peer::connect(&server);
+    late.register(); // registers before it has published anything
+    adopt(&server, &mut late, |s| s.candidate);
+    assert_eq!(
+        status(&server).epoch,
+        boot_epoch,
+        "staging must not move the epoch"
+    );
+
+    // The mapping arrives, as a real VMM's does, and only then the owner dies.
+    late.publish_memory();
+    late.configure_event_ring();
+    src.disconnect();
+    drop(src);
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            status(&server).owner == Some(late.id())
+        })
+        .is_ok(),
+        "the candidate must be promoted once it has published the memory; status was {:?}",
+        status(&server)
+    );
+    assert_eq!(
+        late.wait_for_kick(),
+        1,
+        "the promoted destination must get a working line"
     );
 }

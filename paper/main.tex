@@ -459,6 +459,53 @@ interrupt into at most one redundant ring scan, and the 5\,s-window experiment
 shows that one such interrupt is sufficient even when the window is two to
 three orders of magnitude wider than the natural one.
 
+\subsection{Two-phase device hand-over}
+\label{sec:twophase}
+The ownership rule above still has a hole that our own measurements exposed
+(\S\ref{sec:injection}): a registration is a \emph{takeover}. The destination of
+a live migration registers its interrupt line while the source is still running,
+so if the migration then fails or is cancelled, the line points at a connection
+that no longer exists and nothing reinstalls it. We therefore split registration
+from ownership.
+
+\begin{itemize}
+\item The first connection to register becomes the owner immediately, which is
+      the boot case and is unchanged.
+\item A \emph{second} connection that registers becomes a \emph{candidate}: its
+      eventfd descriptors are kept, but the device is not touched, so the
+      incumbent's line stays installed and the incumbent may still tear down.
+\item A control-socket command \code{commit} runs the preflight and, if it
+      passes, installs the candidate's line and advances an epoch. Only then does
+      the previous owner lose the device.
+\item \code{abort} drops a candidate and leaves the incumbent alone, and
+      \code{reclaim} lets the previous owner take the device back within a lease
+      if a committed hand-over has to be rolled back.
+\end{itemize}
+
+The preflight is evaluated while the candidate is still staged, so a refusal is
+retryable and can never leave half a hand-over behind; the candidate is consumed
+only at the commit point, where the remaining failure modes abort before
+ownership changes. The hard conditions are that the candidate's interrupt
+eventfd is usable and that it has published at least the guest memory the device
+is already DMAing into; the driver's declaration that the destination is ready
+is a separate, configurable condition. The mechanism lives in usbvfiod and the
+policy lives in the controller, so no VMM change is needed.
+
+When the owning connection disappears, the device must not stay with it: a dead
+connection cannot service an interrupt. The server therefore falls back to the
+previous owner if it is still connected, promotes a staged candidate if there is
+one (subject to the automatic part of the preflight), and otherwise leaves the
+device unowned so that the next registration claims it exactly as at boot. The
+last case is what lets a source VMM that reconnects after a failed migration get
+its device back without anyone driving the control path.
+
+The control commands reuse the socket usbvfiod already exposes for
+attach/detach/list. The three existing commands are fixed-size binary messages;
+the hand-over commands carry a connection id, an epoch and a free-form reason,
+so they use a line-oriented text encoding on the same socket. That keeps every
+ownership decision readable in a log or by hand during an incident, and it costs
+no VMM change.
+
 \subsection{DMA mapping idempotence}
 \label{sec:dma}
 Because source and destination map the \emph{same} guest memory under
@@ -484,9 +531,12 @@ logic in \code{main.rs}; a \code{-{}-max-clients} option; the idempotent DMA
 bus; and the DMA, reset and interrupt-registration paths of the xHCI backend.
 Two further changes are small but load-bearing: moving the hand-over kick into
 the interrupter worker, and the two debug-only injection hooks used in
-Section~\ref{sec:injection}. The working tree as a whole differs from
-the upstream revision by seven files (516 added and 104 removed lines); six of
-those files, i.e.\ everything except the interrupter, are 483/103. The
+Section~\ref{sec:injection}. The two-phase hand-over described in
+\S\ref{sec:twophase} adds a further ten files (2\,563 added and 124 removed
+lines) on top of that, of which 874 added lines are the integration test
+\code{tests/handover\_selftest.rs}. The working tree as a whole differs from
+the upstream revision by the seven files above (516 added and 104 removed
+lines); six of those files, i.e.\ everything except the interrupter, are 483/103. The
 device emulation itself is untouched. Unit tests grew by three (108 to 111 test
 attributes; \code{cargo test} reports 112 passing),
 and the project's strict lint configuration (\code{clippy} with all, nursery and
@@ -966,6 +1016,55 @@ arms establish that the fixes are necessary and sufficient \emph{for this
 mechanism}; they do not measure how often the mechanism decides the outcome in
 production.
 
+\subsection{Failure recovery with the two-phase hand-over}
+\label{sec:recovery}
+The design says a failed migration must leave the old environment running. We
+measured both halves of that with the real VMs, and the second half is the case
+our own earlier measurements had shown to be broken.
+
+\paragraph{A destination that cannot serve the device is refused.}
+The deterministic part of the argument is a test that drives real vfio-user
+connections and real eventfds against the real binaries
+(\code{cargo test -{}-test handover\_selftest}, eight tests). A destination that
+handshakes and registers but never publishes the guest memory is refused with
+\code{EPREFLIGHT\_A3\_DMA\_INCOMPLETE}, the candidate stays staged for a retry,
+the incumbent's line is untouched (zero kicks on either eventfd), and the epoch
+does not move. An uncommitted candidate expires after the preflight window and a
+late commit is refused with \code{EPREFLIGHT\_TIMEOUT}. The same tests cover the
+positive cases by counting eventfd kicks: staging a destination produces no kick
+on either peer, a commit produces exactly one kick on the destination and none on
+the source, and a reclaim produces one on the source again. Two further tests
+cover the fallback chain and one shows the ownership guard is load-bearing by
+turning it off and watching the stale teardown install the dummy line.
+
+\paragraph{A migration that fails after the destination registered.}
+The real-VM case is the one that used to hang the source. We hold the
+destination's device activation open with a debug-only injection, kill the
+destination as soon as the server records the staged candidate, and let the
+migration fail. Measured outcome: the source logs
+\code{Migration failed} followed by \code{Resumed VM successfully after failed
+migration}; the server log shows the candidate was staged and then expired and
+that the source's line was never replaced (one line installation in the whole
+run, the source's own boot registration, and zero stale teardowns); and the
+guest's copy finished with \code{rc=0} and the correct digest,
+\ReclaimEnumerations{} re-enumerations and \ReclaimErrors{} reset or I/O error
+lines after the failure. That is the opposite of the earlier result, where the
+same failure left the guest stalled for the rest of the run.
+
+\paragraph{A migration that succeeds.}
+The successful path was re-measured with the same harness. The destination is
+staged, the source keeps the device, and the hand-over closes within one
+source-teardown interval: Cloud Hypervisor deactivates the source's device about
+\TwoPhaseTeardownMs\,ms after the destination registers, at which point the
+server promotes the staged candidate. Copy continuity is unchanged
+(\code{VERDICT: PASS}, downtime \TwoPhaseDowntimeMs\,ms, matching digest, zero
+re-enumerations), and the exposure window - the interval in which the
+destination runs with no line installed - is \TwoPhaseWindowMin--%
+\TwoPhaseWindowMax\,ms, with \TwoPhaseExposed{} exposed transfer completions that
+the install-time kick covers. When the source's teardown is held open, the
+controller's \code{ready}+\code{commit} closes the window instead, in
+\TwoPhaseCommitMs\,ms.
+
 \subsection{Defects found}
 Table~\ref{tab:defects} lists the four things that had to be fixed: the
 single-accept limitation itself and the three defects it exposed. Two are
@@ -1103,16 +1202,19 @@ problem: it needs the device state to be transferred or an equivalent device to
 be provided on the destination, and it cannot preserve a host-side session.
 
 \paragraph{Failure and rollback.}
-Ownership of the device is decided by whichever connection most recently
-registered interrupts, and it is not committed to a migration transaction. If a
-migration is cancelled after the destination has installed its line, the source
-is left running with a line that will not be serviced, and nothing re-registers
-it. Our own Phase-0 measurements showed that CH's
-\code{timeout\_strategy=cancel} did not in fact bring the source back to a
-usable state. A production design needs an explicit epoch that is committed at
-migration commit time, plus a revoke and re-register path, and it needs to be
-tested with a destination crash and a source-side cancel while I/O is in
-flight. We did not implement or test that.
+This is now implemented (\S\ref{sec:twophase}) and measured
+(\S\ref{sec:recovery}), but the measurements also delimit what it can promise.
+Cloud Hypervisor deactivates the \emph{source's} vfio-user device at the
+switchover, before the migration outcome is known, so a failure after that point
+cannot be rolled back to the source by usbvfiod alone: the source's connection is
+gone, and whether the source guest can use the device again depends on the VMM
+re-establishing it. What usbvfiod guarantees is that the device never belongs to
+a dead connection and that the next registration claims it. The lease-bounded
+\code{reclaim} is therefore the mechanism for a hand-over the controller itself
+committed, while the fallback chain covers the rest. A production deployment also
+wants the device state to be part of the migration transaction rather than
+reconstructed by a controller, and the trust boundary is unchanged: the control
+socket must be as trusted as the vfio-user socket.
 
 \paragraph{Socket trust and bounds.}
 The vfio-user socket grants whoever can connect it full DMA authority over the

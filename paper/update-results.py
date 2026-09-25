@@ -236,6 +236,10 @@ def main() -> int:
     ap.add_argument("csv", nargs="?", help="legacy: a single summary.csv")
     ap.add_argument("--batch", default="/run/usb-batch")
     ap.add_argument("--exposure")
+    ap.add_argument("--two-phase", default=None,
+                    help="file of key/value pairs measured on the two-phase "
+                         "hand-over runs (see data/two-phase.txt); emits the "
+                         "\\TwoPhase* and \\Reclaim* macros")
     ap.add_argument("--exposure-prefix", default="debug-",
                     help="only exposure rows for runs whose name starts with this "
                          "prefix are used (default: the acceptance arm)")
@@ -444,6 +448,36 @@ def main() -> int:
             L.append("")
     else:
         need(False, f"no exposure file at {args.exposure}; exposure macros omitted")
+
+    # ---- two-phase hand-over ----
+    if args.two_phase and os.path.exists(args.two_phase):
+        kv: dict[str, str] = {}
+        for line in open(args.two_phase):
+            parts = line.split()
+            if len(parts) == 2 and not parts[0].startswith("#"):
+                kv[parts[0]] = parts[1]
+
+        def val(key: str) -> str:
+            if key not in kv:
+                need(False, f"two-phase data is missing {key!r}")
+                return "?"
+            return kv[key]
+
+        L += [
+            "% ---- two-phase hand-over. Measured on the runs recorded in",
+            "% data/two-phase.txt; see the development log for the raw artifacts.",
+            f"\\newcommand{{\\TwoPhaseTeardownMs}}{{{val('teardown_ms')}}}",
+            f"\\newcommand{{\\TwoPhaseDowntimeMs}}{{{val('downtime_ms')}}}",
+            f"\\newcommand{{\\TwoPhaseWindowMin}}{{{val('window_min_ms')}}}",
+            f"\\newcommand{{\\TwoPhaseWindowMax}}{{{val('window_max_ms')}}}",
+            f"\\newcommand{{\\TwoPhaseExposed}}{{{val('exposed')}}}",
+            f"\\newcommand{{\\TwoPhaseCommitMs}}{{{val('commit_ms')}}}",
+            f"\\newcommand{{\\ReclaimEnumerations}}{{{val('reclaim_enumerations')}}}",
+            f"\\newcommand{{\\ReclaimErrors}}{{{val('reclaim_errors')}}}",
+            "",
+        ]
+    else:
+        need(False, "no two-phase data file; two-phase macros omitted")
 
     # ---- fault injection ----
     L.append("% ---- fault injection arms ----")

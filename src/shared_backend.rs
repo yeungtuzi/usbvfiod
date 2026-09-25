@@ -70,12 +70,6 @@ struct Registration {
     start: u32,
     count: u32,
     fds: Vec<File>,
-    /// DMA ranges this connection had published when it registered.
-    ///
-    /// Kept on the registration so the preflight can still be evaluated after the
-    /// owner's own bookkeeping has been dropped, which is what happens when the
-    /// owner disconnects and leaves a candidate behind.
-    ranges: Vec<(u64, u64)>,
 }
 
 impl Registration {
@@ -93,7 +87,6 @@ impl Registration {
             start: self.start,
             count: self.count,
             fds: self.clone_fds()?,
-            ranges: self.ranges.clone(),
         })
     }
 }
@@ -388,7 +381,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         //    transfer.
         if o.auto_reclaim {
             if let Some(cand) = o.candidate.take() {
-                if let Err(e) = preflight_hard(&cand, &owner_ranges) {
+                if let Err(e) = preflight_hard(&o, &cand, &owner_ranges) {
                     warn!(
                         "not promoting candidate {}: it failed the preflight ({e}); the device stays unowned",
                         cand.id
@@ -559,11 +552,8 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                 return Err(HandoverError::NotReady);
             }
             let owner_ranges = o.mapped.get(&o.owner).cloned().unwrap_or_default();
-            if let Err(e) = preflight_hard(cand, &owner_ranges) {
-                info!(
-                    "hand-over commit refused: candidate {id} failed the preflight ({e}); candidate ranges {:?}, owner ranges {owner_ranges:?}",
-                    cand.reg.ranges
-                );
+            if let Err(e) = preflight_hard(&o, cand, &owner_ranges) {
+                info!("hand-over commit refused: candidate {id} failed the preflight ({e})");
                 return Err(e);
             }
         }
@@ -665,12 +655,26 @@ impl Ownership {
 /// memory the device was already DMAing into. The driver's readiness declaration
 /// is deliberately *not* part of this: nobody is left to declare it when the
 /// owner is gone.
-fn preflight_hard(cand: &Candidate, owner_ranges: &[(u64, u64)]) -> Result<(), HandoverError> {
+/// The candidate's mappings are read from the live ownership state rather than
+/// from a snapshot taken when it registered: a VMM maps the guest memory and
+/// *then* activates the device, but the two are not ordered relative to each
+/// other (measured: the destination's `DmaMap` arrives 0.3\,ms after its
+/// `SetIrqs`, with the source still owning the device). Checking a snapshot would
+/// reject a candidate that had in fact published everything.
+fn preflight_hard(
+    o: &Ownership,
+    cand: &Candidate,
+    owner_ranges: &[(u64, u64)],
+) -> Result<(), HandoverError> {
     if cand.reg.fds.iter().any(|f| f.metadata().is_err()) {
         return Err(HandoverError::BadEventFd);
     }
-    let cand_ranges = &cand.reg.ranges;
-    if !ranges_cover(cand_ranges, owner_ranges) {
+    let cand_ranges = o.mapped.get(&cand.id).cloned().unwrap_or_default();
+    if !ranges_cover(&cand_ranges, owner_ranges) {
+        info!(
+            "preflight: candidate {} has published {cand_ranges:?}, the device needs {owner_ranges:?}",
+            cand.id
+        );
         return Err(HandoverError::DmaIncomplete);
     }
     Ok(())
@@ -872,7 +876,6 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                     start,
                     count,
                     fds: cloned,
-                    ranges: o.mapped.get(&self.id).cloned().unwrap_or_default(),
                 });
                 if first {
                     o.epoch += 1;
@@ -899,7 +902,6 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                 start,
                 count,
                 fds,
-                ranges: o.mapped.get(&self.id).cloned().unwrap_or_default(),
             },
             deadline,
             ready,

@@ -30,6 +30,7 @@ $(TARGET).pdf: $(TARGET).tex $(wildcard figures/*.tex) $(wildcard data/*.dat) \
 data:
 	python3 update-results.py --batch "$(RUNROOT)" \
 	  --exposure data/handover-exposure.txt \
+	  --two-phase data/two-phase.txt \
 	  --inject "$(INJECT)" --replug "$(REPLUG)" --out data/results.tex
 
 clean:
