@@ -261,6 +261,8 @@ def main() -> int:
     # The two-phase hand-over, run with the final code (round 9/10): the
     # equivalence arm for the delivered implementation.
     final = arm("final-default")
+    # An independent repeat of the same arm, to show the result is not a one-off.
+    final_rep = arm("final-rep")
     need(debug.n > 0, f"no debug arm in {args.batch}/results-debug.csv")
     need(control.n > 0, "no control arm")
     need(release.n > 0, "no release arm")
@@ -328,6 +330,10 @@ def main() -> int:
         f"\\newcommand{{\\FinalDowntimeMedian}}{{{final.med('downtime_ms')}}}",
         f"\\newcommand{{\\FinalCPLow}}{{{f'{final.ci()[0]:.2f}' if final.n else '?'}}}",
         f"\\newcommand{{\\FinalCPHigh}}{{{f'{final.ci()[1]:.2f}' if final.n else '?'}}}",
+        "",
+        "% ---- repeat of the final-code arm ----",
+        f"\\newcommand{{\\FinalRepRuns}}{{{final_rep.n}}}",
+        f"\\newcommand{{\\FinalRepPass}}{{{final_rep.k}}}",
         "",
         "% ---- kick disabled (negative control) ----",
         f"\\newcommand{{\\KickOffRuns}}{{{kickoff.n}}}",
@@ -614,6 +620,7 @@ def main() -> int:
                 "guard-off"):
         show(f"inject:{tag}", inj[tag])
     show("final/two-phase", final)
+    show("final/two-phase (repeat)", final_rep)
     print(f"  exposure (CH-clock lower / harness epoch / raw epoch): "
           f"{sum(1 for r in rows_exp if r[0] > 0)}/{sum(1 for r in rows_exp if r[1] > 0)}/"
           f"{sum(1 for r in rows_exp if r[2] > 0)} of {len(rows_exp)} runs")

@@ -1375,3 +1375,45 @@ md5 MATCH   0 重枚举   0 reset/IO 错误
 > binding 模式的证据是单次真机 PASS（`usb-b2`）+ 否决路径 PASS（`usb-b4`）+
 > 18 个无 guest 测试；若要把 binding 也扩成批次，只需 `EXTRA_ENV="BINDING=1"` 再跑一遍，
 > 属于下一轮可选的加固。
+
+## D32. 真机 A5：把 U 盘在"目标端仅暂存"时拔掉（objective 里最后一项真机注入）
+
+`BINDING=1 HANDOVER=commit DETACH_DURING_STAGE=1`（`usb-a5`）：控制器 `watch` 拿到候选
+（此时注册被 binding 挂住）→ 用 `remote --detach 1 7` 真的把设备摘掉 → 再 ready+commit：
+
+```
+after the detach        : owner=0 prev=- candidate=1 epoch=1 … devices=0
+status after commit     : owner=0 prev=- candidate=1 epoch=1 … devices=0     ← 归属/epoch 未动
+remote log              : Error: EPREFLIGHT_A5_DEVICE_GONE: no USB device is attached any more, so there is nothing to hand over
+interrupt lines installed: 1     kicks: 1     stale teardowns ignored: 0
+migration outcome       : failed（随后由 VETO 终止目标端）
+```
+
+三条含义：
+
+1. **A5 在真实摘除时确实拒了**（不是只有注入清单的合成测试），且**从未给目标端装线**
+   （全run 只有源端启动那一次装线 + 一次 kick），源端的线全程未动。
+2. 设备被拔之后源端 guest 自己会报设备消失（复制失败）——这是"拔出 U 盘"的诚实结果，
+   设计对 T4 的期望本来就只是"**明确拒绝、而不是静默卡死**"，这一点达到了。
+3. 这一跑顺带回归了**旧二进制控制协议**（`--detach`）在多客户端模式下的可用性——
+   即 D2x 那次"接收端先读 1 字节再分发"重构后的握手路径。
+
+## D33. 第二组 10 次等价批（重复臂）：10/10
+
+`guest/acceptance-batch.sh 10 migrate` 又跑了一组（TAG 名为 `binding`，但**我没有传
+`EXTRA_ENV=BINDING=1`**，所以它实际仍是默认配置；照实记录这个标签与配置不一致）：
+
+```
+=== binding (default config, repeat arm): 10/10 passed ===
+  CP95 [0.692, 1.000]   downtime min 6 / median 16 / max 19 ms   copy median 56.4 s
+  0 重枚举、0 reset/IO 错误；每轮 3 次装线、0 次陈旧 teardown
+```
+
+于是**交付代码的默认配置累计 20/20 真机迁移通过**（`final-default` 10/10 + 本重复臂 10/10），
+与既有 20/20 的判定标准完全一致；论文把重复臂作为独立宏
+（`\FinalRepRuns/\FinalRepPass`）写进等价性段落，CSV 复制为
+`/root/usb-runs/results-final-rep.csv`。
+
+> binding 模式的批次（`EXTRA_ENV="BINDING=1"`）**未跑**：它有单次 T1 PASS（`usb-b2`）、
+> 否决路径 PASS（`usb-b4`）、A5 真机 PASS（`usb-a5`）与 4 个 binding 专项测试支撑，
+> 但如果要同样强度的批次证据，只需带 `EXTRA_ENV="BINDING=1"` 再跑一遍（约 50 分钟）。

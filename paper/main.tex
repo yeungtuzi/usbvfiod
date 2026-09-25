@@ -1083,8 +1083,9 @@ The delivered implementation was then run as an equivalence arm of its own:
 \FinalPass{} of \FinalRuns{} migrations with the code that ships, all with
 matching digests, no re-enumerations and no I/O errors, a median downtime of
 \FinalDowntimeMedian\,ms and a median copy time of \FinalCopyMedian\,s
-(exact 95\,\% interval \FinalCPLow--\FinalCPHigh) - i.e.\ the hand-over rework did
-not cost a single successful migration.
+(exact 95\,\% interval \FinalCPLow--\FinalCPHigh), and an independent repeat of
+the same arm passed \FinalRepPass{} of \FinalRepRuns{} - i.e.\ the hand-over
+rework did not cost a single successful migration.
 
 \paragraph{Making the decision binding.}
 The lever turned out to be the reply itself. A VMM activates the destination's
