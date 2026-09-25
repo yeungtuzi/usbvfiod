@@ -89,13 +89,15 @@ fn main() -> Result<()> {
             Some(Duration::from_millis(args.handover_preflight_timeout_ms)),
             Some(args.handover_require_ready),
             Some(args.handover_auto_reclaim),
+            Some(args.handover_require_device),
         );
         info!(
-            "two-phase hand-over enabled: preflight timeout {} ms, reclaim lease {} ms, require-ready {}, auto-reclaim {}",
+            "two-phase hand-over enabled: preflight timeout {} ms, reclaim lease {} ms, require-ready {}, auto-reclaim {}, require-device {}",
             args.handover_preflight_timeout_ms,
             args.handover_lease_ms,
             args.handover_require_ready,
-            args.handover_auto_reclaim
+            args.handover_auto_reclaim,
+            args.handover_require_device
         );
         Runner::Multi(shared)
     } else {

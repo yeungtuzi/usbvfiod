@@ -46,6 +46,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     fs::File,
+    os::fd::AsRawFd,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -118,6 +119,14 @@ struct Ownership {
     preflight_timeout: Duration,
     require_ready: bool,
     auto_reclaim: bool,
+    /// Enforce A5 (a device must still be attached).
+    require_device: bool,
+    /// Number of attached devices as last reported by the control plane.
+    ///
+    /// `None` means nobody has asked the hot-plug port yet, and then A5 cannot be
+    /// evaluated; the device inventory is only observable asynchronously, so the
+    /// control plane refreshes it before every hand-over decision.
+    device_count: Option<u64>,
     /// Test hook: pretend every connection owns the device.
     disable_owner_guard: bool,
 }
@@ -130,6 +139,7 @@ pub enum HandoverError {
     PreflightTimeout,
     NotReady,
     BadEventFd,
+    DeviceGone,
     DmaIncomplete,
     NotPreviousOwner,
     PreviousGone,
@@ -145,7 +155,14 @@ impl fmt::Display for HandoverError {
             Self::WrongCandidate => write!(f, "the named connection is not the candidate"),
             Self::PreflightTimeout => write!(f, "the candidate's preflight timed out"),
             Self::NotReady => write!(f, "the driver has not declared the destination ready"),
-            Self::BadEventFd => write!(f, "the candidate's interrupt eventfd is not usable"),
+            Self::BadEventFd => write!(
+                f,
+                "the candidate's interrupt eventfd is not usable as an eventfd"
+            ),
+            Self::DeviceGone => write!(
+                f,
+                "no USB device is attached any more, so there is nothing to hand over"
+            ),
             Self::DmaIncomplete => {
                 write!(f, "the candidate has not mapped the device's DMA ranges")
             }
@@ -171,6 +188,7 @@ impl HandoverError {
             Self::PreflightTimeout => "EPREFLIGHT_TIMEOUT",
             Self::NotReady => "EPREFLIGHT_NOT_READY",
             Self::BadEventFd => "EPREFLIGHT_A4_EVENTFD",
+            Self::DeviceGone => "EPREFLIGHT_A5_DEVICE_GONE",
             Self::DmaIncomplete => "EPREFLIGHT_A3_DMA_INCOMPLETE",
             Self::NotPreviousOwner => "ERECLAIM_NOT_PREVIOUS_OWNER",
             Self::PreviousGone => "ERECLAIM_PREV_GONE",
@@ -191,6 +209,12 @@ pub struct HandoverStatus {
     pub candidate_ready: bool,
     pub lease_ms: u64,
     pub live: Vec<u64>,
+    /// Devices the control plane last reported, if it ever did.
+    pub devices: Option<u64>,
+    /// Whether A5 (a device must still be attached) is enforced.
+    pub require_device: bool,
+    /// Whether the driver's readiness declaration is required to commit.
+    pub require_ready: bool,
 }
 
 impl HandoverStatus {
@@ -200,13 +224,16 @@ impl HandoverStatus {
             v.map_or_else(|| "-".to_owned(), |v| v.to_string())
         }
         format!(
-            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} live={:?}",
+            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} devices={} require_ready={} require_device={} live={:?}",
             id(self.owner),
             id(self.prev),
             id(self.candidate),
             self.epoch,
             self.candidate_ready,
             self.lease_ms,
+            id(self.devices),
+            self.require_ready,
+            self.require_device,
             self.live,
         )
     }
@@ -239,6 +266,8 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                 preflight_timeout: Duration::from_millis(2000),
                 require_ready: true,
                 auto_reclaim: true,
+                require_device: true,
+                device_count: None,
                 disable_owner_guard: false,
             }),
             next_id: std::sync::atomic::AtomicU64::new(0),
@@ -252,6 +281,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         preflight_timeout: Option<Duration>,
         require_ready: Option<bool>,
         auto_reclaim: Option<bool>,
+        require_device: Option<bool>,
     ) {
         let mut o = self.lock_ownership();
         if let Some(v) = lease {
@@ -266,6 +296,21 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         if let Some(v) = auto_reclaim {
             o.auto_reclaim = v;
         }
+        if let Some(v) = require_device {
+            o.require_device = v;
+        }
+    }
+
+    /// Record how many devices the hot-plug port currently holds.
+    ///
+    /// Called by the control plane, which is the only place that can ask the port
+    /// (the inventory is behind the port's async message channel).
+    pub fn note_device_inventory(&self, devices: u64) {
+        let mut o = self.lock_ownership();
+        if o.device_count != Some(devices) {
+            info!("device inventory: {devices} attached device(s)");
+        }
+        o.device_count = Some(devices);
     }
 
     /// Create a handle for one client connection.
@@ -471,6 +516,9 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             candidate_ready: o.candidate.as_ref().is_some_and(|c| c.ready),
             lease_ms: u64::try_from(o.lease.as_millis()).unwrap_or(u64::MAX),
             live,
+            devices: o.device_count,
+            require_device: o.require_device,
+            require_ready: o.require_ready,
         }
     }
 
@@ -666,8 +714,11 @@ fn preflight_hard(
     cand: &Candidate,
     owner_ranges: &[(u64, u64)],
 ) -> Result<(), HandoverError> {
-    if cand.reg.fds.iter().any(|f| f.metadata().is_err()) {
+    if cand.reg.fds.iter().any(|f| !is_eventfd(f)) {
         return Err(HandoverError::BadEventFd);
+    }
+    if o.require_device && o.device_count == Some(0) {
+        return Err(HandoverError::DeviceGone);
     }
     let cand_ranges = o.mapped.get(&cand.id).cloned().unwrap_or_default();
     if !ranges_cover(&cand_ranges, owner_ranges) {
@@ -678,6 +729,25 @@ fn preflight_hard(
         return Err(HandoverError::DmaIncomplete);
     }
     Ok(())
+}
+
+/// True if `file` is an eventfd.
+///
+/// A vfio-user client hands us a descriptor for its interrupt line; nothing in
+/// the protocol says it has to be an eventfd. Anything else either cannot be
+/// read by the guest's VMM at all or fails on write, so the hand-over refuses it
+/// up front instead of installing a line that can never signal.
+///
+/// The check reads `/proc/self/fdinfo/<fd>`, which reports `eventfd-count` only
+/// for eventfds. `fcntl(F_GETFL)` cannot tell an eventfd from a pipe or a regular
+/// file, and a plain `write` probe would have side effects on the descriptor the
+/// VMM is about to wait on.
+fn is_eventfd(file: &File) -> bool {
+    if file.metadata().is_err() {
+        return false;
+    }
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()));
+    info.is_ok_and(|text| text.contains("eventfd-count:"))
 }
 
 /// True if every range in `needed` is covered by `have`.

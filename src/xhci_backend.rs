@@ -73,13 +73,16 @@ impl InterruptLine for InterruptEventFd {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
         // Write any 8 byte value to the EventFd.
-        // TODO: we just expect this to always work currently.
-        let _amount = self
-            .fd
-            .lock()
-            .unwrap()
-            .write(&1u64.to_le_bytes())
-            .expect("should always be able to write event fd");
+        //
+        // The descriptor comes from a vfio-user client, so a write can fail (a
+        // read-only or already-closed descriptor, a full pipe). Panicking here
+        // would stop the interrupter worker and take the whole device down for
+        // every guest, which is a lot of damage for one client's mistake: report
+        // it and keep the worker alive.
+        let written = self.fd.lock().unwrap().write(&1u64.to_le_bytes());
+        if let Err(e) = written {
+            tracing::warn!("failed to signal the guest's interrupt eventfd: {e}");
+        }
     }
 }
 

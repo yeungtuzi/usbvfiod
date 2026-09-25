@@ -98,6 +98,16 @@ pub struct Cli {
     #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set)]
     pub handover_require_ready: bool,
 
+    /// Require a USB device to still be attached before a hand-over may be
+    /// committed (preflight A5).
+    ///
+    /// The device inventory is only observable through the hot-plug port, so the
+    /// control plane refreshes it on every hand-over command; a client that never
+    /// speaks the control protocol leaves the condition unenforced. Only used with
+    /// --max-clients > 1.
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set)]
+    pub handover_require_device: bool,
+
     /// Give the device back to the previous owner automatically if the committed
     /// owner disappears within the reclaim lease.
     ///

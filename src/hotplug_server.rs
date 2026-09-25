@@ -98,8 +98,10 @@ fn handle_command(
                 .send_device_list(devices, socket)
                 .context("Failed to handle list command")?;
         }
-        Command::Handover(command) => handle_handover(command, socket, handover)
-            .context("Failed to handle hand-over command")?,
+        Command::Handover(command) => {
+            handle_handover(command, socket, handover, hotplug_control, async_runtime)
+                .context("Failed to handle hand-over command")?;
+        }
     }
 
     Ok(())
@@ -110,7 +112,26 @@ fn handle_handover(
     command: HandoverCommand,
     socket: &mut UnixStream,
     handover: Option<&Arc<LocalSharedState>>,
+    hotplug_control: &HotplugControl<LocalDevice>,
+    async_runtime: &runtime::Handle,
 ) -> Result<()> {
+    // Refresh the device inventory before any hand-over decision: the port only
+    // answers asynchronously, so the server cannot ask it from inside the
+    // preflight, while the control plane can and does so on every command.
+    if let Some(state) = handover {
+        let attached = async_runtime.block_on(hotplug_control.list_devices()).len() as u64;
+        // Test hook (debug builds only): pretend nothing is attached, so the A5
+        // refusal can be exercised on a host with no spare USB device to unplug.
+        #[cfg(debug_assertions)]
+        let attached = if std::env::var_os("USBVFIOD_INJECT_NO_DEVICE").is_some() {
+            warn!("TEST HOOK: pretending no USB device is attached (USBVFIOD_INJECT_NO_DEVICE)");
+            0
+        } else {
+            attached
+        };
+        state.note_device_inventory(attached);
+    }
+
     let reply = handover.map_or_else(
         || {
             HandoverReply::error(

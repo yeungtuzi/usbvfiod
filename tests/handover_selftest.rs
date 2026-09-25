@@ -84,7 +84,18 @@ impl Server {
         command
             .arg("--no-color")
             .args(["-v", "-v"])
-            .args(["--max-clients", "2"])
+            .args(["--max-clients", "2"]);
+        // These tests drive the state machine without a physical USB device, so
+        // the "a device must still be attached" condition (A5) cannot hold here;
+        // it has its own test below, which switches it on and injects the empty
+        // inventory instead.
+        if !extra
+            .iter()
+            .any(|a| a.starts_with("--handover-require-device"))
+        {
+            command.args(["--handover-require-device", "false"]);
+        }
+        command
             .arg("--socket-path")
             .arg(&vfio_socket)
             .arg("--hotplug-socket-path")
@@ -933,5 +944,87 @@ fn a_destination_that_publishes_memory_after_registering_is_still_usable() {
         late.wait_for_kick(),
         1,
         "the promoted destination must get a working line"
+    );
+}
+
+#[test]
+fn a_candidate_without_a_real_eventfd_is_refused() {
+    // A6 is "the driver says it is ready"; A4 is "the line it sent can actually
+    // signal". A descriptor that is not an eventfd would either never be read by
+    // the destination VMM or fail on write, so the hand-over refuses it instead of
+    // installing a line that can never fire - and the incumbent keeps its own.
+    let server = Server::start("bad-fd", &["--handover-require-device", "false"]);
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let devnull = File::open("/dev/null").expect("open /dev/null");
+    let mut bad = Peer::connect(&server);
+    bad.client
+        .set_irqs(MSIX_IRQ_INDEX, 0, 0, 1, &[devnull.as_raw_fd()])
+        .expect("set_irqs with a non-eventfd descriptor");
+    adopt(&server, &mut bad, |s| s.candidate);
+    let _ = &bad.client;
+
+    // The commit needs readiness first, and then the descriptor is what fails.
+    expect_ok(&server, &HandoverCommand::Ready { conn: bad.id() });
+    expect_refusal(
+        &server,
+        &HandoverCommand::Commit {
+            conn: bad.id(),
+            epoch: boot_epoch,
+        },
+        "EPREFLIGHT_A4_EVENTFD",
+    );
+    let refused = status(&server);
+    assert_eq!(refused.owner, Some(src.id()), "the owner must be untouched");
+    assert_eq!(refused.epoch, boot_epoch, "the epoch must be untouched");
+    src.assert_no_kick();
+}
+
+#[test]
+fn a_handover_without_an_attached_device_is_refused() {
+    // A5: if the device is gone there is nothing to hand over, and the honest
+    // answer is a clear refusal rather than a hand-over that leaves the guest on a
+    // line no device will ever signal. The inventory is injected because these
+    // tests run without a physical USB device.
+    let server = Server::start_with_env(
+        "no-device",
+        &["--handover-require-device", "true"],
+        &[("USBVFIOD_INJECT_NO_DEVICE", "1")],
+    );
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register(); // the boot registration is not gated on a preflight
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let mut dst = Peer::connect(&server);
+    dst.prepare();
+    dst.register();
+    adopt(&server, &mut dst, |s| s.candidate);
+    expect_ok(&server, &HandoverCommand::Ready { conn: dst.id() });
+    expect_refusal(
+        &server,
+        &HandoverCommand::Commit {
+            conn: dst.id(),
+            epoch: boot_epoch,
+        },
+        "EPREFLIGHT_A5_DEVICE_GONE",
+    );
+    assert_eq!(status(&server).owner, Some(src.id()));
+    assert_eq!(status(&server).epoch, boot_epoch);
+    src.assert_no_kick();
+    assert!(
+        server
+            .log()
+            .contains("pretending no USB device is attached"),
+        "the injected empty inventory must be visible in the log"
     );
 }
