@@ -1246,6 +1246,24 @@ by the underlying \code{nusb} library. Cross-host migration is a different
 problem: it needs the device state to be transferred or an equivalent device to
 be provided on the destination, and it cannot preserve a host-side session.
 
+\paragraph{What the hand-over cannot promise.}
+Two limits are worth stating next to the mechanism, because both were measured
+rather than assumed. First, a refusal cannot travel in the reply: the vfio-user
+client reads only the reply header and ignores its error flag, so the
+destination VMM sees success either way and the refusal has to be executed by
+whoever owns that VMM (terminate it, which closes the socket). usbvfiod's part is
+the guarantee it can keep - no commit, no install. Second, and more consequential
+for the design, \emph{a hand-over that has been committed can barely be rolled
+back on this VMM}: Cloud Hypervisor deactivates the source's device as part of
+the switchover, so with binding on the source's connection disappears about
+8\,ms after the commit that released it, and the lease-bounded reclaim then has
+nobody to hand the device back to (measured: the device ends up unowned and the
+destination's guest is lost with the VMM that held it). The practical
+consequence is that the controller must decide \emph{before} committing, which is
+exactly what the binding preflight makes possible; the reclaim path remains the
+mechanism for a previous owner that is still connected, and the fallback chain
+still guarantees that the device never stays with a dead connection.
+
 \paragraph{Failure and rollback.}
 This is now implemented (\S\ref{sec:twophase}) and measured
 (\S\ref{sec:recovery}), but the measurements also delimit what it can promise.

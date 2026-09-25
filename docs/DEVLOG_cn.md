@@ -1319,3 +1319,33 @@ md5 MATCH   0 重枚举   0 reset/IO 错误
 | `usb-b1`（binding，A3 仍前置） | 42.255565 暂存 → 42.295550 预检看到候选已发布 `[]` → commit 被拒 → **44.256181 dma_map**（= park 窗口 2000 ms 耗尽、应答放行之后才到） | park 期间目标端**根本无法** map：CH 对 vfio-user client 是串行的，`DmaMap` 排在 `SetIrqs` 的应答后面 |
 | `usb-b2`（binding，A3 后置） | 24.291575 暂存 → 24.331742 commit（40 ms）→ 24.331878 `may proceed` → **24.332177 dma_map**（放行后 0.4 ms） | 后置是正确的：commit 成功、downtime 59 ms、md5 MATCH、VERDICT PASS |
 | `usb-b3`（binding 降级，未 park） | 暂存后 **0.17 ms** 就 dma_map | 不 park 时 map 紧跟注册——与 b1/b2 并不矛盾：不是"CH 总是晚 map"，而是"被 park 时 map 被排在应答之后" |
+
+## D30. 真机"提交后目标端崩溃"：binding 让它可达，但结论是"不要提交后再后悔"
+
+`BINDING=1 HANDOVER=commit KILL_DST_AFTER_COMMIT=1`（`usb-b5`）：
+
+```
+04.529200  hand-over candidate: client 1 staged (owner 0 keeps the line until commit)
+04.568854  hand-over committed: owner 0 -> 1 (epoch 2)
+04.568978  client 1 may proceed                     ← park 被 commit 放行
+04.577136  Connection closed                        ← 目标端被杀（commit 后 8 ms）
+04.601856  the device is unowned (epoch 3)          ← prev 已不在，无法 auto-reclaim
+→ md5 MISMATCH，VERDICT FAIL
+```
+
+**为什么 reclaim 没救回来**：commit 放行 park 后，CH 在 ~8 ms 内完成切换点并 deactivate 源端设备、
+关闭源端连接；等我们的杀伤落地时 `prev`（源端）已经不在了，于是走"unowned"。
+
+这条对设计有直接含义，必须如实写进结论：
+
+1. **"提交后再回滚"在本 VMM 上几乎没有窗口**。租约（默认 5 s）只在 `prev` 仍连接时才有意义，
+   而 CH 的源端在切换点就自己拆掉了。原来设计里"提交后取消 → 租约内 reclaim"这条路径，
+   在 CH 上的实际可用窗口是 **~8 ms**，不是 5 s。deterministic 的 T7b 测试仍然有价值
+   （它验证机制：owner 死了而 prev 还活着时设备归还给 prev），但它描述的不是 CH 的现实时序。
+2. **所以主机制必须是"提交前否决"（`VETO`/binding），而不是"提交后回滚"**。b4 已经证明这条路
+   可行：控制器不 commit、由 supervisor 终止目标端 → 迁移失败 → 源端连接与中断线全程未动 →
+   复制跑完、md5 一致。
+3. **"提交后目标端崩溃"要如实说明能保什么、不能保什么**：目标端在切换点之后持有**唯一**在跑的
+   guest，它崩了 guest 就没了（这与 usbvfiod 无关，任何 live migration 都一样）。usbvfiod 能保证
+   且已验证的是**设备不会留在死连接上**（变 unowned，下一个注册立即接管）。
+   `usb-b5` 是这一限制的反例证据，保留原始日志，不当作成功。

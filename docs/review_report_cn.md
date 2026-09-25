@@ -588,3 +588,11 @@ owner 连接消失时的三级兜底），补齐 A4/A5 预检，把真机 harnes
 | 写作与工件 | 发现并如实写下"vfio-user 客户端只读应答头、忽略错误标志"，因此"回错"不是可行的否决手段；论文新增 §Making the decision binding 记录该杠杆、实测数字与两条限制；`data/two-phase.txt` 增加 `bind_downtime_ms`（宏 `\BindDowntimeMs`）；原始日志重新归档（23 份文本证据 + `SHA256SUMS` + `MANIFEST.txt`，目标端 `sha256sum -c` 全 OK） | **Accept** |
 
 **仍未做**：B1（候选 region 读取完整性，A3 间接覆盖）；论文三评审面板未针对 M6 重跑。
+
+### 12.7 轮次 9 追加之三：提交后崩溃的边界（负面结果，如实记录）
+
+| 轴 | 内容 | 结论 |
+|---|---|---|
+| 系统 | `usb-b5`（binding + commit 后杀目标端）：commit 放行 park 后 ~8 ms，CH 完成切换点并拆掉源端；杀伤落地时 `prev` 已死 → 设备变 unowned，无法 reclaim；guest 随目标端消失（md5 MISMATCH、VERDICT FAIL） | **Accept 作为限制**：主机制必须是提交前否决（`usb-b4` 已证），"提交后租约内回滚"在本 VMM 上实际窗口约 8 ms，不是 5 s。论文与设计文档据此改写，不声称"提交后崩溃可保源" |
+| 方法学 | 该结论来自真机时序（commit → 源端 teardown 8 ms），并据此重新界定 deterministic T7b 测试的适用范围（机制验证，而非 CH 现实时序） | **Accept** |
+| 写作 | 负面结果写入开发日志 D30、评审报告 12.7、论文限制段；原始日志保留（`usb-b5`） | **Accept** |
