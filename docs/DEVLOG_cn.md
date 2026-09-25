@@ -702,3 +702,35 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 4. **一次事故的代价**：并发堆叠任务把 `/tmp`（tmpfs）塞满 → 打挂用户的 KVM 101 →
    连带其提供的 CIFS 共享卡死。纪律（TMPDIR 落 ext4、单并发、动手前看水位、
    网络挂载一律 `timeout`）已写入 D18 并全程遵守。
+
+## D22.【最高纪律】对他人 GitHub 项目的任何写操作必须逐条获得用户批准（2026-09-20）
+
+**规则（用户明确定义，优先级高于本文件其余所有流程约定）**
+
+> 除非得到用户**逐一批准**，否则**不得**对任何 GitHub 上**他人的项目**执行写操作，
+> 包括但不限于：创建/修改/关闭 **PR**、发 **issue**、发 **comment**、提交 **review**、
+> 推送标签或分支、以及**通过 push fork 间接导致 PR 被创建或更新**（例如推送某个
+> 作为 PR head 的分支，会更新上游的 PR）。
+> 每一次操作都必须先说明"对哪个仓库、做什么、为什么"，得到明确同意后才能执行。
+
+**执行方式（本 agent 自我约束）**
+1. 对第三方仓库（`cyberus-technology/*`、`rust-vmm/*`、`cloud-hypervisor/*` 等）**默认只读**：
+   允许 `git clone/fetch/ls-remote`、读 PR/issue 页面；不允许任何写。
+2. **推送前先判断目标分支是否某个 PR 的 head**。若是 → 属于"间接写 PR"，必须先获批。
+3. 对自己的 fork（`yeungtuzi/*`）的主分支推送，若**不会**导致任何上游 PR 变化，
+   视为保存工作所需的最小操作，但仍会在每次推送后明确报告"这次推送影响了什么"；
+   只要用户要求，连这类推送也改为先批准。
+4. 任何需要批准的操作，一律**先停下来问**，不得因为"就差一步"而自行继续。
+
+**截至本条目，已发生的第三方写操作盘点（均为本会话之前完成，本会话未新增）**
+
+| 对象 | 类型 | 内容 | 状态 |
+|---|---|---|---|
+| `cyberus-technology/usbvfiod` | PR **#316** | 多客户端 + 陈旧客户端保护 + dma_unmap/reset（head: `yeungtuzi:pr/multi-client`） | **draft，未提交评审**；本会话未再推送该 head 分支，PR 内容未变 |
+| `rust-vmm/vfio` | PR **#171** | `resettable` 解析取反修复（head: `yeungtuzi:fix/resettable-flag-parsing`） | 同上，draft，未变 |
+
+以下操作**从未**执行：任何 issue、任何 comment、任何 review、任何非 fork 仓库的直接 push、任何标签推送。
+
+**本会话对 `origin`（`github.com/yeungtuzi/usbvfiod`，用户自己的 fork）的推送**：
+只推送 `main` 分支，**不会**更新上述两个 PR（它们的 head 分别是 `pr/multi-client`
+与 `fix/resettable-flag-parsing`）。若用户要求，后续连这类推送也先逐次批准。
