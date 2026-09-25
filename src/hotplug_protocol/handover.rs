@@ -328,6 +328,8 @@ pub struct HandoverSnapshot {
     pub binding: bool,
     /// Whether a control client has been seen (binding degrades without one).
     pub controller: bool,
+    /// Whether the DMA-coverage precondition is deferred to after the commit.
+    pub deferred_a3: bool,
 }
 
 impl HandoverSnapshot {
@@ -355,6 +357,8 @@ impl HandoverSnapshot {
                 snapshot.binding = v == "true";
             } else if let Some(v) = field.strip_prefix("controller=") {
                 snapshot.controller = v == "true";
+            } else if let Some(v) = field.strip_prefix("deferred_a3=") {
+                snapshot.deferred_a3 = v == "true";
             }
         }
         snapshot

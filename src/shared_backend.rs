@@ -241,6 +241,8 @@ pub struct HandoverStatus {
     pub binding: bool,
     /// Whether a control client has been seen (binding is degraded without one).
     pub controller: bool,
+    /// Whether A3 (the candidate's DMA coverage) is deferred to after the commit.
+    pub deferred_a3: bool,
 }
 
 impl HandoverStatus {
@@ -250,7 +252,7 @@ impl HandoverStatus {
             v.map_or_else(|| "-".to_owned(), |v| v.to_string())
         }
         format!(
-            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} devices={} require_ready={} require_device={} binding={} controller={} live={:?}",
+            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} devices={} require_ready={} require_device={} binding={} controller={} deferred_a3={} live={:?}",
             id(self.owner),
             id(self.prev),
             id(self.candidate),
@@ -262,6 +264,7 @@ impl HandoverStatus {
             self.require_device,
             self.binding,
             self.controller,
+            self.deferred_a3,
             self.live,
         )
     }
@@ -494,7 +497,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         //    transfer.
         if o.auto_reclaim {
             if let Some(cand) = o.candidate.take() {
-                if let Err(e) = preflight_hard(&o, &cand, &owner_ranges) {
+                if let Err(e) = preflight_hard(&o, &cand, &owner_ranges, true) {
                     warn!(
                         "not promoting candidate {}: it failed the preflight ({e}); the device stays unowned",
                         cand.id
@@ -591,6 +594,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             require_ready: o.require_ready,
             binding: o.block_registration,
             controller: o.controller_seen,
+            deferred_a3: o.block_registration && (o.controller_seen || o.require_controller),
         }
     }
 
@@ -706,7 +710,16 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                 return Err(HandoverError::NotReady);
             }
             let owner_ranges = o.mapped.get(&o.owner).cloned().unwrap_or_default();
-            if let Err(e) = preflight_hard(&o, cand, &owner_ranges) {
+            // A3 cannot be evaluated while the destination's registration reply is
+            // parked: a VMM maps the guest memory *after* its device activation
+            // returns (measured order: SetIrqs, then DmaMap 0.06-0.3 ms later), so
+            // the mapping is behind the reply we are holding. The commit is
+            // therefore allowed without it, and the status says so
+            // (`deferred_a3=`); a destination that never publishes the memory is a
+            // VMM that violated the protocol, and the lease/fallback machinery
+            // still applies.
+            let defer_a3 = o.block_registration && (o.controller_seen || o.require_controller);
+            if let Err(e) = preflight_hard(&o, cand, &owner_ranges, !defer_a3) {
                 info!("hand-over commit refused: candidate {id} failed the preflight ({e})");
                 return Err(e);
             }
@@ -821,6 +834,7 @@ fn preflight_hard(
     o: &Ownership,
     cand: &Candidate,
     owner_ranges: &[(u64, u64)],
+    check_dma: bool,
 ) -> Result<(), HandoverError> {
     if cand.reg.fds.iter().any(|f| !is_eventfd(f)) {
         return Err(HandoverError::BadEventFd);
@@ -843,6 +857,10 @@ fn preflight_hard(
             );
             return Err(HandoverError::IrqMismatch);
         }
+    }
+    if !check_dma {
+        // Binding mode defers A3, see the comment at the call site.
+        return Ok(());
     }
     let cand_ranges = o.mapped.get(&cand.id).cloned().unwrap_or_default();
     if !ranges_cover(&cand_ranges, owner_ranges) {

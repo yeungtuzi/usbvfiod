@@ -1382,3 +1382,81 @@ fn binding_degrades_without_a_controller() {
     );
     let _ = &dst;
 }
+
+#[test]
+fn binding_commits_a_destination_that_maps_after_its_registration() {
+    // The real VMM order, measured on a live migration: the destination sends
+    // `SetIrqs` and only then `DmaMap` (0.06-0.3 ms later). With binding on, the
+    // reply to that `SetIrqs` is what we are holding, so the mapping is
+    // necessarily behind it and A3 cannot be evaluated at commit time. The commit
+    // must therefore succeed and install the line, and the status must say that
+    // A3 was deferred.
+    let server = Server::start(
+        "binding-late-map",
+        &[
+            "--handover-require-device",
+            "false",
+            "--handover-block-registration",
+            "true",
+        ],
+    );
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    // Register first, publish the memory afterwards - but the registration parks,
+    // so the mapping can only happen once the commit has released it.
+    let socket = server.vfio_socket.clone();
+    let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+    let registration = std::thread::spawn(move || {
+        let mut dst = Peer::connect_to(&socket);
+        staged_tx.send(()).expect("about to register");
+        let result = dst.try_register();
+        // The VMM would now map; do the same and keep the connection alive.
+        if result.is_ok() {
+            dst.publish_memory();
+            dst.configure_event_ring();
+        }
+        let kicks = dst.wait_for_kick();
+        (result.is_ok(), kicks, dst)
+    });
+    staged_rx.recv().expect("about to register");
+    let parked = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = status(&server);
+            if snapshot.candidate.is_some() {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "no candidate was staged");
+            sleep(Duration::from_millis(20));
+        }
+    };
+    assert!(
+        parked.deferred_a3,
+        "the status must say that A3 is deferred while binding"
+    );
+    let dst_id = parked.candidate.expect("candidate");
+    expect_ok(&server, &HandoverCommand::Ready { conn: dst_id });
+    let committed = expect_ok(
+        &server,
+        &HandoverCommand::Commit {
+            conn: dst_id,
+            epoch: boot_epoch,
+        },
+    );
+    assert_eq!(
+        committed.owner,
+        Some(dst_id),
+        "the commit must take even though the destination has not mapped yet"
+    );
+    let (ok, kicks, dst) = registration.join().expect("registration thread");
+    assert!(ok, "the commit must release the parked registration");
+    assert!(kicks > 0, "the destination must be signalled");
+    src.assert_no_kick();
+    drop(dst);
+}
