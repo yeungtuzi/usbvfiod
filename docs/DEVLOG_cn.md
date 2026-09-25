@@ -798,3 +798,22 @@ issue/comment/review，**未**触碰上游仓库的任何代码或分支。
    今天 CH 不会发，但若将来 CH 恢复路径重新 enable IRQ 或我们加一个 helper，即自动生效。
 
 设计文档已补 §4.5.1 与 T7b/T7c/T7d 三个测试项。
+
+### D23.2 「CH 自己一定知道迁移结果」——已确认，且 CH 已经主动发出信号
+
+核对 CH 源码后确认：**不需要我们推断，也不需要改 CH**。CH 有两条现成通道：
+
+1. **专用事件通道** `--event-monitor path=<path>`（或 `fd=`），事件以 **JSON** 写出
+   （`event_monitor/src/lib.rs::event_log`，含 `timestamp/source/event/properties`）；
+2. 同一函数同时写普通日志 `Event: source = {source} event = {event}`，所以现有 `src.log`/`dst.log` 里就有。
+
+与结果相关的全部事件（触发点已核对）：源端 `migration-started`(`lib.rs:1698`)、
+`pausing/paused`(`vm.rs:3275/3301`)、**`resuming/resumed`(`vm.rs:3306/3329`，由失败恢复路径
+`try_resume_vm_after_failed_migration` 的 `vm.resume()` 触发，`lib.rs:2143`) = 迁移没成功**；
+目标端 `migration-receive-started`(`1179`)、**`migration-receive-finished`(`3319`)**、
+**`migration-receive-failed`(`3322`)**；源端成功路径 `shutdown`(`2696`)。
+
+**设计升级**：新增 §4.5.2，用**事件驱动的控制器**取代"从 `send-migration` 返回码猜结果"：
+在 `migration-receive-started` 且预检全绿时 `ready`+`commit`；在 `migration-receive-failed`
+或源端 `resumed` 时按"是否已 commit"选择 abort 或 reclaim。这样"失败/取消"的判定权交给 CH 本身，
+harness 不再需要推断取消语义。测试矩阵新增 T12（取消）与 T13（成功不误回滚）。

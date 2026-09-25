@@ -262,6 +262,57 @@ A. 提交前失败（常见）                        B. 提交后取消（需�
                                                 -> src=owner(epoch=N+1)，装线 + kick
 ```
 
+### 4.5.2 迁移结果的检测：直接用 CH 自己的事件（不改 CH）
+
+**结论：能检测，而且 CH 已经主动告诉我们了。** 不需要我们猜、也不需要"源端重新注册"这种间接信号。
+
+CH 有两条现成的输出通道：
+
+1. **专用事件通道**：`--event-monitor path=<path>`（或 `fd=<fd>`），事件以 **JSON** 写出
+   （`event_monitor/src/lib.rs::event_log`；`timestamp/source/event/properties`）；
+2. **普通日志**：同一个函数同时 `info!("Event: source = {source} event = {event} ...")`，
+   因此即使不加参数，现有 `src.log`/`dst.log` 里也有这些行。
+
+与迁移结果相关的**全部**事件与触发点（已核对源码）：
+
+| 事件 | 来源 | 触发点 | 含义 | 控制器的动作 |
+|---|---|---|---|---|
+| `migration-started` | source | `vmm/src/lib.rs:1698` | 迁移开始 | 标记"迁移中" |
+| `pausing` / `paused` | source | `vmm/src/vm.rs:3275/3301` | 源端暂停（切换点） | 候选预检的最后窗口 |
+| `resuming` / `resumed` | source | `vmm/src/vm.rs:3306/3329`（由 `try_resume_vm_after_failed_migration` → `vm.resume()` 触发，`vmm/src/lib.rs:2143`） | **源端被恢复 = 迁移没成功（失败或取消）** | 已 commit → **reclaim**；未 commit → abort |
+| `migration-receive-started` | dest | `vmm/src/lib.rs:1179` | 目标端开始接收/接管 | 预检须在此前变绿，随后 `ready`+`commit` |
+| `migration-receive-finished` | dest | `vmm/src/lib.rs:3319` | **目标端接管成功** | 无需回滚（成功） |
+| `migration-receive-failed` | dest | `vmm/src/lib.rs:3322` | **目标端失败** | 未 commit → abort；已 commit → reclaim |
+| `shutdown` | source | `vmm/src/lib.rs:2696` | 源端退出（成功迁移的正常路径） | 无需 reclaim |
+
+配套的日志行（可作为 JSON 通道不可用时的兜底）：
+成功 `Migration completed after ...`（`:1895`）；失败 `Migration failed: ...`（`:2185`）；
+接收侧失败 `Migration aborted as migration command ... failed`（`:1165`）。
+
+#### 事件驱动的控制器（取代"从 send-migration 返回值猜"）
+
+```text
+watcher: 订阅 src 与 dst 两个 CH 的事件通道
+  on dst migration-receive-started:
+       若预检全绿 -> HandoverReady + HandoverCommit      # 在目标 guest 恢复前完成装线
+  on dst migration-receive-failed:
+       若已 commit -> HandoverReclaim{src}               # 目标端挂了
+       否则        -> HandoverAbort{dst}                 # 尚未切换，源端无感
+  on src resuming/resumed:                                # CH 自己恢复源端 = 取消/失败
+       若已 commit -> HandoverReclaim{src}
+  on dst migration-receive-finished: 什么都不做（成功）
+```
+
+这样"失败/取消"的判定权完全交给 CH 自己，而不是由 harness 根据
+`send-migration` 的返回码推断（后者拿不到"取消"这类语义）。
+
+**顺序保证**：commit 发生在 `migration-receive-started` 之后、源端 `resumed` 之前；
+因此若随后出现 `migration-receive-failed` 或源端 `resumed`，reclaim 一定能命中租约窗口。
+
+**一个边界情形**：`preserve_source=true` 的成功迁移不会发 `resumed`（源端只是停住），
+所以 `resumed` 不会误判为失败；反之，成功路径上源端会 `shutdown`，其连接消失，
+即使有人误发 reclaim 也会被 `ERECLAIM_PREV_GONE` 拒绝。
+
 ### 4.6 超时与租约
 
 | 参数 | 默认 | 作用 |
@@ -322,6 +373,8 @@ A. 提交前失败（常见）                        B. 提交后取消（需�
 | T7b | 提交后目标端崩溃（自动兜底） | commit 后 kill 目标 CH | owner 连接断开 → 自动归还 `prev`；源端恢复 |
 | T7c | 非上一任发 reclaim | 用第三个连接/错误 pid 发 reclaim | `ERECLAIM_NOT_PREVIOUS_OWNER` / `ERECLAIM_UNTRUSTED_PEER`，归属不变 |
 | T7d | 陈旧 epoch | 用 `N-1` 发 reclaim | `ERECLAIM_EPOCH_MISMATCH`，归属不变 |
+| T12 | 事件驱动检测（取消） | 迁移中途杀目标端 / 触发源端 `resumed` | 控制器据 `migration-receive-failed` 或 `resumed` 自动 reclaim；源端复制继续 |
+| T13 | 事件驱动检测（成功） | 正常迁移 | `migration-receive-finished` → 不回滚；与 T1 等价 |
 | T8 | 租约过期后 reclaim | 超过 `lease_ms` | 拒绝并给 `ERECLAIM_LEASE_EXPIRED`；设备归属不变 |
 | T9 | 陈旧 epoch 破坏性命令 | 带 `epoch-1` 发 `SetIrqs` 空 fd | 拒绝并诊断 |
 | T10 | 单客户端回归 | `--max-clients 1` | 与基线逐字节一致 |
