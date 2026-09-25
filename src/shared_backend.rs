@@ -269,14 +269,28 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
     }
 
     /// Create a handle for one client connection.
+    ///
+    /// The id is handed out before the serving thread blocks in `accept`, so a
+    /// freshly created handle is a reserved slot rather than a peer. The slot is
+    /// recorded as live by [`SharedBackend::touch`] once a client actually sends
+    /// something, which keeps the status line honest: an id that shows up there
+    /// belongs to a connection that exists.
     pub fn connect(self: &Arc<Self>) -> SharedBackend<CRD> {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.lock_ownership().live.insert(id);
         SharedBackend {
             id,
             state: Arc::clone(self),
+            established: false,
+        }
+    }
+
+    /// Record that a client is connected on this slot.
+    fn establish(&self, id: u64) {
+        let mut o = self.lock_ownership();
+        if o.live.insert(id) {
+            info!("vfio-user client {id} connected");
         }
     }
 
@@ -577,11 +591,24 @@ fn ranges_cover(have: &[(u64, u64)], needed: &[(u64, u64)]) -> bool {
 pub struct SharedBackend<CRD: CompleteRealDevice> {
     id: u64,
     state: Arc<SharedBackendState<CRD>>,
+    /// Whether this slot has already been reported as live.
+    established: bool,
 }
 
 impl<CRD: CompleteRealDevice> SharedBackend<CRD> {
     fn backend(&self) -> MutexGuard<'_, XhciBackend<CRD>> {
         self.state.lock_backend()
+    }
+
+    /// Note that a client is really there before the first command is served.
+    ///
+    /// Every data-path entry point calls this, so a slot appears in the status as
+    /// soon as its connection is more than a pending `accept`.
+    fn touch(&mut self) {
+        if !self.established {
+            self.established = true;
+            self.state.establish(self.id);
+        }
     }
 
     /// Test hook (debug builds only): pretend that every connection owns the
@@ -622,6 +649,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         offset: u64,
         data: &mut [u8],
     ) -> Result<(), std::io::Error> {
+        self.touch();
         self.backend().region_read(region, offset, data)
     }
 
@@ -631,6 +659,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         offset: u64,
         data: &[u8],
     ) -> Result<(), std::io::Error> {
+        self.touch();
         self.backend().region_write(region, offset, data)
     }
 
@@ -642,6 +671,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         size: u64,
         fd: Option<File>,
     ) -> Result<(), std::io::Error> {
+        self.touch();
         // Ownership is taken first and held across the backend call: the lock
         // order is always `ownership` -> `backend`, never the other way round.
         let mut o = self.state.lock_ownership();
@@ -658,6 +688,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         address: u64,
         size: u64,
     ) -> Result<(), std::io::Error> {
+        self.touch();
         // A departing VMM unmaps the regions it created. If another connection
         // has taken the device over in the meantime, that unmap must not tear
         // down the new owner's mappings. Ownership is checked in the same
@@ -680,6 +711,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
     }
 
     fn reset(&mut self) -> Result<(), std::io::Error> {
+        self.touch();
         // A `DeviceReset` is a data-path command that disturbs the device, so a
         // stale client must not be able to reset a device it no longer owns.
         // Before the first registration there is no owner and the reset is
@@ -704,6 +736,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         count: u32,
         fds: Vec<File>,
     ) -> Result<(), std::io::Error> {
+        self.touch();
         let mut o = self.state.lock_ownership();
         o.expire_candidate(Instant::now());
 
