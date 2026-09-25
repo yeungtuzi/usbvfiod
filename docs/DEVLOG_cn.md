@@ -1100,10 +1100,14 @@ checker 现在报 `OK: 0 identifying match(es) in 162 files`，快照重新生�
 2. **T8 补测**：commit 后等租约过期再 reclaim → `ERECLAIM_LEASE_EXPIRED`，归属与 epoch 不变、
    目标端线仍可被 kick。
 3. **T10 单客户端回归**：`MAX_CLIENTS=1 SKIP_MIGRATION=1` 真机跑通（md5 一致、1 次装线）。
-4. **一次自伤（写进纪律）**：我在 `usb-migration-demo.sh` **正在执行**的时候去编辑它，
-   bash 是按字节偏移边读边执行的，于是后半段被读成了碎片
-   （`syntax error near unexpected token 'then'`，`Z1=2`）。
-   教训：**脚本运行期间不得修改该脚本**（以及运行期间不要重编它调用的二进制）。
+4. **两次自伤（写进硬纪律）**：我在 `usb-migration-demo.sh` **正在执行**的时候去编辑它，
+   bash 是按字节偏移边读边执行的，于是后半段被读成碎片：
+   第一次 `syntax error near unexpected token 'then'`（`Z1=2`）、
+   第二次 `syntax error near unexpected token '('`（`E2X=2`，`line 427`）。
+   **硬纪律：只要还有 demo 在跑（`pgrep -f usb-migration-demo` 非空），
+   就不得修改 `guest/*.sh`、也不得 `cargo build`（会换掉它们调用的二进制）。**
+   两次都只损失了一次运行时间；两次的日志都保留在各自目录里，并在本节说明是自伤而非代码缺陷
+   （`usb-z1`：跑到一半被打断；`usb-e2x`：故障注入与 aftermath 都已完成，只是 verdict 段被打断）。
 
 ### D27.5 CH 事件：我们的程序可以主动订阅（已实测）
 

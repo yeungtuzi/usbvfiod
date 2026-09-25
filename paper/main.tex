@@ -499,6 +499,15 @@ device unowned so that the next registration claims it exactly as at boot. The
 last case is what lets a source VMM that reconnects after a failed migration get
 its device back without anyone driving the control path.
 
+Driving the hand-over needs one deployment precondition: the controller
+learns that a migration failed from the VMM's own event stream, so Cloud
+Hypervisor has to be launched with \code{-{}-event-monitor} (the launcher here
+passes \code{fd=} for a socketpair it owns and reads, which is a push
+subscription with no file and no log tailing; \code{path=} works equally well).
+Without it the controller can still commit, abort and reclaim, and can still
+wait for a candidate on the control socket, but it cannot notice a failed
+migration and has to rely on the ownership fallbacks instead.
+
 The control commands reuse the socket usbvfiod already exposes for
 attach/detach/list. The three existing commands are fixed-size binary messages;
 the hand-over commands carry a connection id, an epoch and a free-form reason,

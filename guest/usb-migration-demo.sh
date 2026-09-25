@@ -21,6 +21,15 @@
 # and republishes the events as flushed `<source>/<event>` lines, so a decision
 # here can react to what the VMM reports without racing a block buffer.
 #
+# REQUIREMENT: this harness starts each VMM through `guest/ch-with-events.py`,
+# which appends `--event-monitor fd=<socketpair>`. A VMM started any other way
+# sends us nothing, and the controller then has no way to learn that a migration
+# failed: it can still drive ready/commit over the control socket and it can
+# still wait for a candidate with `remote --handover-watch`, but a failed
+# migration is only noticed through the ownership fallbacks. If you launch
+# Cloud Hypervisor yourself, pass `--event-monitor fd=<n>` (or `path=<file>`) to
+# get the notifications this harness relies on.
+#
 # The device hand-over is driven from here, not from the VMM. usbvfiod stages
 # the destination's interrupt registration as a *candidate* and only installs it
 # when the control socket says so, so the harness is the one that decides when
@@ -155,18 +164,15 @@ status_field() { # status_field <key>
 # source's pause and the commit is the window in which the destination can run
 # without an interrupt line, so the controller polls fast and acts immediately.
 handover_controller() {
-  local i=0 cand
-  # Watch the server's own log for the staging record: it is written before the
-  # destination's registration reply is sent, so it is the earliest observable
-  # instant, and reading a file does not compete with the registration for the
-  # ownership lock the way a status query does. The candidate is short-lived in
-  # practice - Cloud Hypervisor deactivates the source about 7 ms after the
-  # destination registers - so the fast path matters.
-  while [ "$i" -lt 24000 ]; do
-    grep -q 'hand-over candidate: client' "$RUN/usbvfiod.log" 2>/dev/null && break
-    sleep 0.005; i=$((i + 1))
-  done
-  cand="$(status_field candidate)"
+  local cand
+  # Wait for the staging *on the server side* instead of polling: the candidate
+  # lives only a few milliseconds (Cloud Hypervisor deactivates the source 3.7-8.3
+  # ms after the destination registers), which is shorter than a status round
+  # trip, so `--handover-watch` parks in usbvfiod and is answered the moment the
+  # destination registers.
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-watch 30000 \
+    > "$RUN/handover.watch" 2>&1 || true
+  cand="$(grep -aoE 'candidate=[^ ]*' "$RUN/handover.watch" | head -1 | cut -d= -f2)"
   if [ -z "$cand" ] || [ "$cand" = "-" ]; then
     log "hand-over: no candidate appeared; the source keeps the device"
     printf 'none\n' > "$RUN/handover.mode"
@@ -253,19 +259,21 @@ kill_destination_on_registration() {
 wait_migration_outcome() {
   local i=0 lines="$RUN/src.events.lines"
   while [ "$i" -lt 900 ]; do
-    if grep -qE ' vm/migration-failed( |$)' "$lines" 2>/dev/null; then
+    # A failure marker is terminal and wins over everything else.
+    if grep -qE ' vm/(migration-failed|resumed)( |$)' "$lines" 2>/dev/null; then
       printf 'failed\n'; return 0
     fi
-    if grep -qE ' vm/resumed( |$)' "$lines" 2>/dev/null; then
-      printf 'resumed\n'; return 0
-    fi
-    if grep -qE ' vm/shutdown( |$)' "$lines" 2>/dev/null; then
-      # The source is gone; look once more for a failure marker before calling
-      # this a successful migration.
+    # Success is `vm/migration-finished`; the source's own exit is `vm/deleted`
+    # followed by `vmm/shutdown` (note the source is `vmm`, not `vm`, for that
+    # last one), and it can appear after a failure too - which is why the failure
+    # check above runs first and is repeated here after a short grace period.
+    if grep -qE ' vm/(migration-finished|deleted|shutdown)( |$)' "$lines" 2>/dev/null \
+       || grep -qE ' vmm/shutdown( |$)' "$lines" 2>/dev/null; then
+      sleep 0.3
       if grep -qE ' vm/(migration-failed|resumed)( |$)' "$lines" 2>/dev/null; then
         printf 'failed\n'; return 0
       fi
-      printf 'shutdown\n'; return 0
+      printf 'finished\n'; return 0
     fi
     sleep 0.1; i=$((i + 1))
   done
@@ -385,7 +393,7 @@ log "send-migration exit=$SEND_RC; migration outcome=$MIGRATION_OUTCOME"
 case "$MIGRATION_OUTCOME" in
   failed|resumed)
     handover_rollback "the migration failed ($MIGRATION_OUTCOME)" ;;
-  shutdown)
+  finished|shutdown)
     log "hand-over: the migration completed; the destination keeps the device" ;;
   *)
     if [ "$SEND_RC" != "0" ]; then
@@ -440,6 +448,7 @@ echo "migration outcome (event) : $(cat "$RUN/migration.outcome" 2>/dev/null || 
 echo "mode                      : $(cat "$RUN/handover.mode" 2>/dev/null || echo '<none>')"
 echo "destination staged at     : $(cat "$RUN/handover.candidate" 2>/dev/null || echo '<never>')"
 echo "hand-over committed at    : $(cat "$RUN/handover.commit" 2>/dev/null || echo '<never>')"
+echo "watch reply (push)        : $(cat "$RUN/handover.watch" 2>/dev/null || echo '<none>')"
 echo "status after staging      : $(cat "$RUN/handover.staged" 2>/dev/null || echo '<none>')"
 echo "status after commit       : $(cat "$RUN/handover.committed" 2>/dev/null || echo '<none>')"
 echo "remote log                : $(tr '\n' '|' < "$RUN/handover.log" 2>/dev/null)"

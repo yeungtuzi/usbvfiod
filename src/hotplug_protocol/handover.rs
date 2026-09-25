@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! status
+//! watch <timeout-ms>
 //! ready <conn>
 //! commit <conn> <epoch>
 //! abort <conn> [reason...]
@@ -55,6 +56,11 @@ pub const MAX_LINE: usize = 1024;
 pub enum HandoverCommand {
     /// Report the ownership state of every connection.
     Status,
+    /// Block until a candidate is staged or the ownership moves, then report the
+    /// state. A candidate exists for a few milliseconds in practice, which is
+    /// shorter than a control round trip, so a controller that polls cannot
+    /// observe one reliably; waiting on the server side can.
+    Watch { timeout_ms: u64 },
     /// The driver declares that the destination VM is ready for the device.
     Ready { conn: u64 },
     /// Atomically hand the device to `conn`, which must be the staged candidate.
@@ -74,6 +80,7 @@ impl HandoverCommand {
     pub fn encode(&self) -> String {
         match self {
             Self::Status => "status".to_owned(),
+            Self::Watch { timeout_ms } => format!("watch {timeout_ms}"),
             Self::Ready { conn } => format!("ready {conn}"),
             Self::Commit { conn, epoch } => format!("commit {conn} {epoch}"),
             Self::Abort { conn, reason } => {
@@ -110,8 +117,19 @@ impl HandoverCommand {
                     .parse()
                     .map_err(|_| HandoverProtocolError::new("epoch is not a number"))
             };
+        let timeout =
+            |words: &mut std::str::SplitWhitespace<'_>| -> Result<u64, HandoverProtocolError> {
+                words
+                    .next()
+                    .ok_or_else(|| HandoverProtocolError::new("missing timeout in milliseconds"))?
+                    .parse()
+                    .map_err(|_| HandoverProtocolError::new("timeout is not a number"))
+            };
         let command = match verb {
             "status" => Self::Status,
+            "watch" => Self::Watch {
+                timeout_ms: timeout(&mut words)?,
+            },
             "ready" => Self::Ready {
                 conn: conn(&mut words)?,
             },
@@ -355,6 +373,7 @@ mod tests {
     fn commands_round_trip() {
         for command in [
             HandoverCommand::Status,
+            HandoverCommand::Watch { timeout_ms: 5000 },
             HandoverCommand::Ready { conn: 7 },
             HandoverCommand::Commit { conn: 7, epoch: 3 },
             HandoverCommand::Abort {
@@ -383,6 +402,8 @@ mod tests {
             "commit 1",
             "commit 1 x",
             "status extra",
+            "watch",
+            "watch x",
             "reclaim 1 2 3",
         ] {
             HandoverCommand::parse(malformed)

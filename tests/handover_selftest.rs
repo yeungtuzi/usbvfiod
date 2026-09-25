@@ -1109,3 +1109,57 @@ fn a_candidate_with_a_different_interrupt_vector_is_refused() {
     assert_eq!(status(&server).epoch, boot_epoch);
     src.assert_no_kick();
 }
+
+#[test]
+fn watching_for_a_candidate_is_notified_instead_of_polling() {
+    // A candidate exists for a few milliseconds on a real migration, which is
+    // shorter than a control round trip, so a controller that polls can miss it
+    // and lose its chance to decide. The server waits instead and answers the
+    // moment the destination registers.
+    let server = Server::start("watch", &["--handover-require-device", "false"]);
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+
+    let watcher = {
+        let socket = server.hotplug_socket.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let command = HandoverCommand::Watch { timeout_ms: 10_000 };
+            let stream = UnixStream::connect(&socket).expect("connect to the control socket");
+            command
+                .send_over_socket(&stream)
+                .expect("send the watch command");
+            let reply = HandoverReply::receive_from_socket(&stream).expect("read the reply");
+            let elapsed = started.elapsed();
+            match reply {
+                HandoverReply::Ok(body) => (elapsed, HandoverSnapshot::parse(&body)),
+                HandoverReply::Err { code, detail } => panic!("watch refused: {code}: {detail}"),
+            }
+        })
+    };
+
+    // Let the watcher park before the destination shows up.
+    sleep(Duration::from_millis(300));
+    let mut dst = Peer::connect(&server);
+    dst.prepare();
+    dst.register();
+    adopt(&server, &mut dst, |s| s.candidate);
+
+    let (elapsed, snapshot) = watcher.join().expect("watcher thread");
+    assert_eq!(
+        snapshot.candidate,
+        Some(dst.id()),
+        "the watcher must be handed the candidate it was waiting for"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the watcher must be woken by the registration, not by its timeout ({elapsed:?})"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the watcher must have parked rather than answered immediately ({elapsed:?})"
+    );
+}

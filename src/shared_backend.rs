@@ -47,7 +47,7 @@ use std::{
     fmt,
     fs::File,
     os::fd::AsRawFd,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -250,6 +250,14 @@ impl HandoverStatus {
 pub struct SharedBackendState<CRD: CompleteRealDevice> {
     backend: Mutex<XhciBackend<CRD>>,
     ownership: Mutex<Ownership>,
+    /// Signalled on every ownership change, so a control client can wait for a
+    /// hand-over instead of polling for one.
+    ///
+    /// A candidate exists for a few milliseconds in practice (Cloud Hypervisor
+    /// deactivates the source 3.7-8.3 ms after the destination registers), which
+    /// is shorter than a control round trip, so polling cannot observe it
+    /// reliably. Waiting on the server side can.
+    changed: Condvar,
     next_id: std::sync::atomic::AtomicU64,
 }
 
@@ -258,6 +266,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
     pub fn new(backend: XhciBackend<CRD>) -> Self {
         Self {
             backend: Mutex::new(backend),
+            changed: Condvar::new(),
             ownership: Mutex::new(Ownership {
                 owner: NO_OWNER,
                 prev: NO_OWNER,
@@ -416,6 +425,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                             "auto-reclaimed the device for client {prev} because the owner {id} disconnected (epoch {})",
                             o.epoch
                         );
+                        self.announce_change();
                         return;
                     }
                     Err(e) => {
@@ -453,6 +463,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                             "promoted the staged candidate {} because the owner {id} disconnected (epoch {})",
                             cand.id, o.epoch
                         );
+                        self.announce_change();
                         return;
                     }
                     Err(e) => {
@@ -479,6 +490,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             "the device is unowned (epoch {}): owner connection {id} is gone and no live connection could take it over; the next registration claims it",
             o.epoch
         );
+        self.announce_change();
     }
 
     /// Install a registration by re-issuing `SetIrqs` with cloned descriptors.
@@ -528,6 +540,39 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         }
     }
 
+    /// Wait until a candidate is staged, the ownership moves, or `timeout` runs
+    /// out, then report the state.
+    ///
+    /// This is the push half of the control protocol: a controller that asks
+    /// before the switchover begins is answered the moment the destination
+    /// registers, so it does not have to poll a window it cannot win.
+    #[must_use]
+    pub fn handover_watch(&self, timeout: Duration) -> HandoverStatus {
+        let mut o = self.lock_ownership();
+        let deadline = Instant::now() + timeout;
+        let start_epoch = o.epoch;
+        loop {
+            o.expire_candidate(Instant::now());
+            if o.candidate.is_some() || o.epoch != start_epoch || Instant::now() >= deadline {
+                return self.render_locked(&o);
+            }
+            // Wake at least every 50 ms so a candidate that expires while we are
+            // parked is still reported as expired rather than as "nothing yet".
+            let left = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50));
+            o = match self.changed.wait_timeout(o, left) {
+                Ok((guard, _)) => guard,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+    }
+
+    /// Wake everyone waiting for an ownership change.
+    fn announce_change(&self) {
+        self.changed.notify_all();
+    }
+
     /// The driver declares the destination ready; a preflight hard condition.
     pub fn handover_ready(&self, id: u64) -> Result<HandoverStatus, HandoverError> {
         let mut o = self.lock_ownership();
@@ -558,6 +603,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                     "hand-over aborted ({reason}): candidate {id} dropped; owner {} keeps the line",
                     o.owner
                 );
+                self.announce_change();
                 Ok(self.render_locked(&o))
             }
             Some(_) => Err(HandoverError::WrongCandidate),
@@ -638,6 +684,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             "hand-over committed: owner {} -> {} (epoch {}); the previous owner may reclaim within {:?}",
             from, cand.id, o.epoch, o.lease
         );
+        self.announce_change();
         Ok(self.render_locked(&o))
     }
 
@@ -675,6 +722,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         o.owner_reg = Some(recorded);
         o.epoch += 1;
         info!("reclaimed the device for client {id} (epoch {})", o.epoch);
+        self.announce_change();
         Ok(self.render_locked(&o))
     }
 }
@@ -971,6 +1019,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                 });
                 if first {
                     o.epoch += 1;
+                    self.state.announce_change();
                     info!(
                         "client {} is the initial owner (epoch {})",
                         self.id, o.epoch
@@ -1002,6 +1051,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
             "hand-over candidate: client {} staged (owner {} keeps the line until commit)",
             self.id, o.owner
         );
+        self.state.announce_change();
 
         // Test hook (debug builds only): hold the reply to the destination's
         // registration for a while. The destination VMM blocks on this reply

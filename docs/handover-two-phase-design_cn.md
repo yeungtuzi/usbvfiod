@@ -1,6 +1,7 @@
 # 两阶段设备交接：预检、显式提交与保源回滚（设计方案 v1.0）
 
-> 版本：v1.0（设计稿，尚未实现）
+> 版本：v1.1（**已实现并实测**，2026-09-25；A1–A6/B3 的状态见 §4.2，实测结论见
+> `DEVLOG_cn.md` D25–D27 与 `review_report_cn.md` 第十二部分）
 > 日期：2026-09-20
 > 关联：`docs/demo-usb-storage-live-migration-plan_cn.md`、`docs/DEVLOG_cn.md`、
 > `paper/main.tex` §VII（Failure and rollback）
@@ -128,24 +129,24 @@ control socket, and no VMM source change is required.
 
 分三档，便于按场景配置（默认值见括号）：
 
-**A. 硬条件（缺一即拒绝，`EPREFLIGHT_*`）**
+**A. 硬条件（缺一即拒绝，`EPREFLIGHT_*`）——实现状态见最后一列（2026-09-25 更新）**
 
-| 编号 | 检查 | 依据 |
+| 编号 | 检查 | 实现位置 | 状态与证据 |
+|---|---|---|---|
+| A1 | 握手完成（`Version`/`DeviceGetInfo`/`DeviceGetRegionInfo`/`GetIrqInfo`） | —— | **由构造保证**：vfio-user 协议里 `SetIrqs` 只能出现在握手之后，而候选正是由 `SetIrqs` 产生的；`vfio_user::Server` 自己处理握手命令，后端看不到也不需要伪造该检查。不假装有独立检查 |
+| A2 | 能力兼容：MSI-X index、单中断限制（region 布局与 `max_data_xfer_size` 由握手固定） | `xhci_backend::validate_irq_request`，**暂存路径也会调用** | **已实现**：非 MSI-X index / `count>1` 直接拒绝（`xhci_backend.rs`） |
+| A3 | **设备所需的 DMA 区间已全部映射**（比较 owner 与候选的**实际覆盖**） | `shared_backend::preflight_hard` + `ranges_cover` | **已实现**：`EPREFLIGHT_A3_DMA_INCOMPLETE`；测试 `a_destination_that_is_missing_memory_is_refused`。注意读**活状态**，因为目标端的 `DmaMap` 晚于它的 `SetIrqs`（实测 0.06–0.3 ms） |
+| A4 | 提供的 **eventfd 可用**（不写入、不注入伪中断） | `shared_backend::is_eventfd`（读 `/proc/self/fdinfo` 要求 `eventfd-count`） | **已实现**：`EPREFLIGHT_A4_EVENTFD`；测试 `a_candidate_without_a_real_eventfd_is_refused`（`/dev/null`）。另修掉 `InterruptEventFd::interrupt` 的 `expect`（客户端 fd 不该打死 interrupter） |
+| A5 | **设备仍在** | 控制面每个交接命令前用 `HotplugControl::list_devices()` 刷新清单 → `SharedBackendState::note_device_inventory` → 预检 | **已实现**：`EPREFLIGHT_A5_DEVICE_GONE`；测试 `a_handover_without_an_attached_device_is_refused`（注入空清单）。`--handover-require-device=false` 可关；无控制面时条件"未上报"而非误伤。设计原想用 `detach_token().is_cancelled()`，但设备清单只在 port 的异步通道里，同步访问器不存在，故改为控制面刷新 |
+| A6 | 控制通道的 **`ready`**：驱动方确认目标 VM 已就绪 | `handover_ready` + `o.require_ready` | **已实现**：`EPREFLIGHT_NOT_READY`；注意兜底提升**不受** A6 约束（owner 已死时无人能声明 ready），只受 A3/A4/B3 约束 |
+
+**B. 可配置条件（默认开启）**
+
+| 编号 | 检查 | 状态 |
 |---|---|---|
-| A1 | 握手完成（`Version`/`DeviceGetInfo`/`DeviceGetRegionInfo`/`GetIrqInfo`） | 服务端已记录，见 `ServerBackend` 调用序列 |
-| A2 | 能力兼容：region 布局、MSI-X index、单中断限制、`max_data_xfer_size` | 与现有 `set_irqs` 校验合并 |
-| A3 | **设备所需的 DMA 区间已全部映射**（用动态 bus 的**实际覆盖**判断，而不是"发过 DmaMap"） | 需新增 `dynamic_bus::covers(addr, size) -> bool`（当前只有 `add`/`remove_range`，**没有查询 API**）；`src/xhci_backend.rs::dma_map` |
-| A4 | 提供的 **eventfd 可用**（`fcntl(F_GETFL)` 等有效性探测；**不写入**，避免向目标注入伪中断） | `InterruptEventFd` |
-| A5 | **设备仍在且健康**（未被拔出、attach 未被取消） | `CompleteRealDevice::detach_token()`（已存在，`CancellationToken`）：`is_cancelled()` 即为"设备已不可用" |
-| A6 | 控制通道的 **`ready`**：驱动方确认目标 VM 已就绪（含"guest 已识别并打算使用该设备"这类业务判断） | 控制通道 |
-
-**B. 可配置条件（默认开启，可用策略关闭）**
-
-| 编号 | 检查 | 说明 |
-|---|---|---|
-| B1 | 候选连接的 **region 读取完整性**：`DeviceGetRegionInfo` 声明的 region 是否都被读过/映射过 | 防止"只握手不干活"的客户端 |
-| B2 | 候选的 **DMA 区间与源端一致**（同一 guest 内存布局） | 同主机 + `memory_mode=memfds` 场景下的强校验 |
-| B3 | 候选的 **中断 index/flags 与源端一致** | 防止能力错配 |
+| B1 | 候选连接的 **region 读取完整性**（防止"只握手不干活"） | **未实现**：需要在 wrapper 里按连接累计 region 读计数；当前由 A3 的 DMA 覆盖间接拦住"什么都没做"的候选 |
+| B2 | 候选的 **DMA 区间与源端一致** | **已由 A3 覆盖**（A3 就是"候选覆盖 owner 的区间"，比"区间集合相等"更弱也更有用：允许候选多映射） |
+| B3 | 候选的 **中断 index/start/count 与源端一致** | **已实现**：`EPREFLIGHT_B3_IRQ_MISMATCH`；测试 `a_candidate_with_a_different_interrupt_vector_is_refused` |
 
 **C. 观测项（不参与判定，只记录）**
 
@@ -153,6 +154,29 @@ control socket, and no VMM source change is required.
 
 失败时返回原因码（`EPREFLIGHT_A3_DMA_INCOMPLETE` 等），
 并在 usbvfiod 日志中打印一行结构化记录，供 harness 断言。
+
+#### 4.2.1 部署前提：要收到通知，VMM 必须按约定启动
+
+交接的**决策**走控制 socket，但**"迁移失败了/切换开始了"这类通知**来自 VMM 自己的事件流。
+因此有一个必须写进部署文档的前提：
+
+> **Cloud Hypervisor 必须带 `--event-monitor fd=<n>`（或 `path=<file>`）启动**，
+> 否则我们收不到任何事件通知。
+
+- `fd=` 形式：由启动方（本 harness 的 `guest/ch-with-events.py`）创建 `socketpair`，
+  把一端作为 `fd=<n>` 传给 CH，另一端自己读——**主动推送订阅**，不落盘、不扫日志、不轮询。
+  CH 侧零改动，只需这一个启动参数。
+- `path=` 形式：指向 FIFO 或文件，效果相同，只是多一个文件系统对象。
+- **不带的后果**（必须在运维文档里写明）：控制器仍可通过控制 socket 做
+  `ready`/`commit`/`abort`/`reclaim`，也可以用 `watch` 等服务端的候选通知；
+  但它**无法及时得知迁移失败**，此时保源只能依赖服务端的三级兜底链，
+  而不是控制器的显式回滚。
+- 实测（`guest/event-monitor-fd.py`）：事件在 CH 发出后微秒级到达
+  （`+0.004s vmm/starting`、`+0.407s vm/booted`）。
+- **不保证不丢**：CH 监听线程用非阻塞 fd 写且忽略写错误，读端堵塞会静默丢事件
+  （JSON 与分隔符是两次 write，满缓冲时甚至可能截断一个事件）。订阅端必须及时 drain。
+
+M6（绑定式预检，见 §9.3）**不需要**新增 CH 启动参数：它只要求控制 socket 可达。
 
 ### 4.3 控制通道协议
 
@@ -166,6 +190,10 @@ status | ready <conn> | commit <conn> <epoch> | abort <conn> [reason…] | recla
 ok owner=0 prev=- candidate=1 epoch=1 ready=false lease_ms=5000 live=[…]
 err code=EPREFLIGHT_NOT_READY detail=…
 ```
+
+其中 `watch <ms>`（`remote --handover-watch <MS>`）是**推送路径**：服务端在 ownership 状态上
+挂一个条件变量，候选一旦暂存、或归属/epoch 变化，就立刻应答；否则最多等 `ms` 毫秒。
+原因是实测数字——候选只活 3.7–8.3 ms，比一次 status 往返还短，**轮询必然漏掉**。
 
 理由是可诊断性：交接是策略决定，而读不回来的策略决定无法排障（`socat` 即可手工驱动）。
 `remote` 工具额外接受 `owner|prev|candidate|<id>` 角色关键字，harness 不必记住连接号。
@@ -412,7 +440,7 @@ watcher: 订阅 src 与 dst 两个 CH 的事件通道
 | `src/device/xhci/interrupter.rs` | 不变（kick 仍由 worker 在换线后执行） |
 | `src/cli.rs` / `src/main.rs` | 三个新参数；默认值保证单客户端行为不变 |
 | `guest/` | 新增交接驱动：harness 在"目标 guest 就绪"后发 `HandoverReady`/`HandoverCommit`；故障注入臂 |
-| `docs/`、`paper/` | 更新 §Failure and rollback（从"未实现"改为"已实现并实测"），并如实记录对论文声明的影响 |
+| `docs/`、`paper/` | **已完成**：论文 §Failure and rollback 已改写为"已实现并实测"，并新增两节；`paper/data/two-phase.txt` 提供数字 |
 
 ---
 
@@ -456,10 +484,10 @@ watcher: 订阅 src 与 dst 两个 CH 的事件通道
 
 ## 8. 对论文声明的影响（必须如实处理）
 
-论文目前把"失败与回滚"列为**未实现的限制**，并明确指出
-"归属不提交到迁移事务、取消后源端无法恢复"。本方案落地后：
+论文原先把"失败与回滚"列为**未实现的限制**，并明确指出
+"归属不提交到迁移事务、取消后源端无法恢复"。**本方案落地后该段已按实测改写**：
 
-- §VII 的该段应从"未实现"改为"已实现（预检 + 显式提交 + 租约内 reclaim）"，并附实测；
+- §VII 的该段已改为"已实现（预检 + 显式提交 + 租约内 reclaim + owner 死亡兜底）"，并附实测；
 - 需要**新增一节**描述两阶段交接的状态机与预检清单；
 - 摘要/贡献里"无重枚举、零感知"的结论**不变**，但增加"失败保源"这一新的可验证性质；
 - 必须重新跑 T1–T11 并保留原始日志（沿用 `artifacts/` 归档与 `collect-artifacts.sh`）。

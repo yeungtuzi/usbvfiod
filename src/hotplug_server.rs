@@ -141,6 +141,11 @@ fn handle_handover(
         },
         |state| match command {
             HandoverCommand::Status => HandoverReply::Ok(state.handover_status().render()),
+            HandoverCommand::Watch { timeout_ms } => HandoverReply::Ok(
+                state
+                    .handover_watch(std::time::Duration::from_millis(timeout_ms))
+                    .render(),
+            ),
             HandoverCommand::Ready { conn } => state.handover_ready(conn).map_or_else(
                 |e| HandoverReply::error(e.code(), e),
                 |status| HandoverReply::Ok(status.render()),

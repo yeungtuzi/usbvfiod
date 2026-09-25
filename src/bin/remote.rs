@@ -40,6 +40,11 @@ fn main() -> Result<()> {
         list_attached(args.socket.as_path())?;
     } else if args.handover_status {
         report(handover(args.socket.as_path(), &HandoverCommand::Status)?)?;
+    } else if let Some(ms) = args.handover_watch {
+        report(handover(
+            args.socket.as_path(),
+            &HandoverCommand::Watch { timeout_ms: ms },
+        )?)?;
     } else if let Some(role) = args.handover_ready {
         let conn = resolve_conn(args.socket.as_path(), &role)?;
         report(handover(
@@ -233,6 +238,7 @@ fn list_attached(socket_path: &Path) -> Result<()> {
         "detach",
         "list",
         "handover_status",
+        "handover_watch",
         "handover_ready",
         "handover_commit",
         "handover_abort",
@@ -271,6 +277,12 @@ struct Cli {
     /// candidate, epoch, readiness).
     #[arg(long)]
     handover_status: bool,
+
+    /// Block until a hand-over candidate is staged (or the ownership moves),
+    /// then print the state. This is the push path: a candidate only lives a few
+    /// milliseconds on a real migration, which polling cannot catch.
+    #[arg(long, value_name = "MS")]
+    handover_watch: Option<u64>,
 
     /// Declare the staged hand-over candidate ready, which is what allows a
     /// commit. Arguments other than a number are resolved through a status
