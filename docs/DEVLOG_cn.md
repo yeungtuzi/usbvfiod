@@ -1042,3 +1042,58 @@ status 查询会被同一次注册串行化，等它拿到状态时候选已经�
 4. **撤回一个更早的乐观推断**：D23 曾设想"控制器在 `migration-receive-started` 时 commit"，
    实测表明该事件远早于切换点，且目标端设备激活时刻才出现候选；控制器的判定时刻必须由数据
    决定（见第 2、3 点），而不是由事件名字推断。
+
+## D27. 收尾：交付物清单、原始日志位置、以及一件必须记下的自查事故
+
+### D27.1 原始日志（全部在 ext4，未占用 tmpfs）
+
+| 目录 | 内容 | 判定 |
+|---|---|---|
+| `/root/.dsh-tmp/usb-w1` | 最终代码、自然 T1：PASS，downtime 8 ms，md5 MATCH，暴露窗口 7.3–11.7 ms | T1 |
+| `/root/.dsh-tmp/usb-demo-t1` | 控制器真正 commit 的那次：staged→committed 23.9 ms，窗口 18.7–28.5 ms | T1（控制器路径） |
+| `/root/.dsh-tmp/usb-f1` | 同一自然路径的复现：PASS，窗口 19.2–29.4 ms | T1 |
+| `/root/.dsh-tmp/usb-f2`、`usb-v2` | 目标端**已注册后**迁移失败：`rc=0`、md5 MATCH、copy continued after failure、0 重枚举、0 reset/IO | T14 |
+| `/root/.dsh-tmp/usb-v1` | 提升预检快照缺陷的现场（FAIL，9 条 reset/IO） | 回归证据 |
+| `/root/.dsh-tmp/usb-demo-t3` | 无人 commit 的负对照：目标端 guest 约 35 s 后失去 USB 栈 | 负对照 |
+| `/root/.dsh-tmp/usb-demo-t2`、`usb-demo-t7` | 迁移已完成后再杀目标端：与设备无关，guest 随目标端消失（说明"杀得太晚"） | 排除性证据 |
+| `/root/usb-e1/{s1,s2}` | 旧实现下的失败复现（源端被留在死线上、`copied` 卡在 6291456 共 16 s） | 缺陷基线 |
+
+分析工具：`guest/analyze-handover-exposure.py`（窗口与窗口内完成数）、
+`guest/verdict.py`（含新增 `--expect-failure` 模式：恢复型运行的判定改为
+"源端已恢复 + 失败后复制继续 + md5 一致 + 零重枚举/零 IO 错误"）。
+
+### D27.2 交付物
+
+- 实现：8 个提交，`cf17db0..9bf0dc6`，已推送到 `origin/main`（用户自己的 fork）；**未触碰任何上游 PR**。
+- 无 guest 证明：`tests/handover_selftest.rs`，9 个测试，连跑 3 次全绿。
+- harness：`guest/usb-migration-demo.sh`（新增控制器、`HANDOVER=`、`KILL_DST_*=`
+  与事件驱动的迁移结果判定）。
+- 设计：`docs/handover-two-phase-design_cn.md`（v1.0 的 §4.3/§4.5.1/§4.5.3/§7/§9/§10 已按实测更新）。
+- 论文：`paper/main.pdf`（14 页，0 error；新增 §Two-phase device hand-over、
+  §Failure recovery with the two-phase hand-over，并重写"Failure and rollback"限制段）；
+  数字经 `paper/data/two-phase.txt` + `update-results.py` 生成，未手写。
+- 匿名快照：`/root/lvllm/usbvfiod-anonymous.tar.gz`
+  sha256 `bbe50b5a057599b3b1a3bfe4273a49396dc259173d442cafd21ce4efb821e4bf`。
+
+### D27.3 自查事故：匿名快照差点带着 fork 账号名出包
+
+`docs/make-anonymous-snapshot.sh` 在最后一步（在解包后的树里跑 checker）**失败**：
+`56 identifying match(es)`，全部来自 `docs/DEVLOG_cn.md` 里 D22 的 GitHub 操作记录——
+那几行用了字面账号名（`<fork-owner>` 之外的写法）。也就是说**在上一轮评审之后，
+开发日志里又出现了账号名**，而我这一轮先改了论文与日志，正好把它顶到台前。
+
+修法：把该文件里的 7 处字面账号名统一替换为既有的 `<fork-owner>` 占位符；
+checker 现在报 `OK: 0 identifying match(es) in 162 files`，快照重新生成并通过三步检查
+（tracked 内容、`pax_global_header` 无 commit id、解包后再扫一遍）。
+
+**纪律更新**：每次准备对外附件前，必须完整跑一次 `docs/make-anonymous-snapshot.sh`
+（它本身会跑 checker），而不是只跑 `redact-identifiers.py`；因为只有前者会在
+**解包后的树**上复核，并拒绝脏工作区。
+
+### D27.4 未完成、需要决策的一项
+
+**M6 绑定式预检**（把"目标端注册的应答"挂住到控制器决定为止，见 §9.3）：
+D26.3 已说明，这是让"缺东西就保持旧环境"成为**强制**语义的唯一办法。
+它是**行为变更**（没有控制器时迁移会在预检窗口后失败），所以按 D22 的纪律，
+我把它写成待批准项而没有自行实施。其余已知缺口：预检 A5（设备健康）仍无后端访问器；
+T3/T4/T8 注入用例未跑；原始日志尚未归档到 `/mnt/mt`。
