@@ -578,3 +578,13 @@ owner 连接消失时的三级兜底），补齐 A4/A5 预检，把真机 harnes
 
 **仍未做**：M6（绑定式预检）——需要用户批准，且应先做"给目标端 `SetIrqs` 回错 → CH 判失败并恢复源端"
 的真机实验；B1（候选 region 读取完整性）未实现（A3 间接覆盖）；论文三评审面板未针对本轮重跑。
+
+### 12.6 轮次 9 追加之二：绑定式预检 M6（用户批准后实施，2026-09-25）
+
+| 轴 | 内容 | 结论 |
+|---|---|---|
+| 系统 | `--handover-block-registration`：暂存后释放 ownership 锁、在条件变量上 park，`commit` 才放行并装线；拒绝时**绝不装线**，由拥有目标 VMM 的 supervisor 终止目标端来把拒绝变成失败的迁移。实测（`usb-b2`）控制器 25 ms 放行、downtime 59 ms、md5 一致、0 重枚举；否决路径（`usb-b4`）源端全程持有中断线、复制跑完且 md5 一致 | **Accept** |
+| 方法学 | 两个只有真机才能发现的顺序事实：① park 期间目标端的 `DmaMap` **排在注册应答之后**（b1 实测差 2.0 s，正好等于 park 窗口；b2 放行后 0.4 ms 到达），因此 binding 下 A3 必须后置并在状态里报 `deferred_a3=true`；② 钩子式 kill（不先与控制 socket 说话）会让 binding 按设计降级、因而不构成否决（`usb-b3` 是这一规则的反例证据，否决必须由真控制器发起，`usb-b4`）。另：park 期间收不到 socket 死亡通知，会多等一个窗口（放行时什么都不装，安全） | **Accept** |
+| 写作与工件 | 发现并如实写下"vfio-user 客户端只读应答头、忽略错误标志"，因此"回错"不是可行的否决手段；论文新增 §Making the decision binding 记录该杠杆、实测数字与两条限制；`data/two-phase.txt` 增加 `bind_downtime_ms`（宏 `\BindDowntimeMs`）；原始日志重新归档（23 份文本证据 + `SHA256SUMS` + `MANIFEST.txt`，目标端 `sha256sum -c` 全 OK） | **Accept** |
+
+**仍未做**：B1（候选 region 读取完整性，A3 间接覆盖）；论文三评审面板未针对 M6 重跑。

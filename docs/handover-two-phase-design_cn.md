@@ -135,7 +135,8 @@ control socket, and no VMM source change is required.
 |---|---|---|---|
 | A1 | 握手完成（`Version`/`DeviceGetInfo`/`DeviceGetRegionInfo`/`GetIrqInfo`） | —— | **由构造保证**：vfio-user 协议里 `SetIrqs` 只能出现在握手之后，而候选正是由 `SetIrqs` 产生的；`vfio_user::Server` 自己处理握手命令，后端看不到也不需要伪造该检查。不假装有独立检查 |
 | A2 | 能力兼容：MSI-X index、单中断限制（region 布局与 `max_data_xfer_size` 由握手固定） | `xhci_backend::validate_irq_request`，**暂存路径也会调用** | **已实现**：非 MSI-X index / `count>1` 直接拒绝（`xhci_backend.rs`） |
-| A3 | **设备所需的 DMA 区间已全部映射**（比较 owner 与候选的**实际覆盖**） | `shared_backend::preflight_hard` + `ranges_cover` | **已实现**：`EPREFLIGHT_A3_DMA_INCOMPLETE`；测试 `a_destination_that_is_missing_memory_is_refused`。注意读**活状态**，因为目标端的 `DmaMap` 晚于它的 `SetIrqs`（实测 0.06–0.3 ms） |
+| A3 | **设备所需的 DMA 区间已全部映射**（比较 owner 与候选的**实际覆盖**） | `shared_backend::preflight_hard` + `ranges_cover` | **已实现**：`EPREFLIGHT_A3_DMA_INCOMPLETE`；测试 `a_destination_that_is_missing_memory_is_refused`。读**活状态**（目标端 `DmaMap` 晚于其 `SetIrqs`）。**binding 生效时 A3 被后置**（`deferred_a3=true`）：park 期间目标端根本无法 map，因为 CH 对 vfio-user client 串行、`DmaMap` 排在应答之后（实测差 2.0 s，正好是 park 窗口）|
+| B3 | 候选的 **中断 index/start/count 与源端一致** | `preflight_hard` | **已实现**：`EPREFLIGHT_B3_IRQ_MISMATCH`（binding 下仍然强制） |
 | A4 | 提供的 **eventfd 可用**（不写入、不注入伪中断） | `shared_backend::is_eventfd`（读 `/proc/self/fdinfo` 要求 `eventfd-count`） | **已实现**：`EPREFLIGHT_A4_EVENTFD`；测试 `a_candidate_without_a_real_eventfd_is_refused`（`/dev/null`）。另修掉 `InterruptEventFd::interrupt` 的 `expect`（客户端 fd 不该打死 interrupter） |
 | A5 | **设备仍在** | 控制面每个交接命令前用 `HotplugControl::list_devices()` 刷新清单 → `SharedBackendState::note_device_inventory` → 预检 | **已实现**：`EPREFLIGHT_A5_DEVICE_GONE`；测试 `a_handover_without_an_attached_device_is_refused`（注入空清单）。`--handover-require-device=false` 可关；无控制面时条件"未上报"而非误伤。设计原想用 `detach_token().is_cancelled()`，但设备清单只在 port 的异步通道里，同步访问器不存在，故改为控制面刷新 |
 | A6 | 控制通道的 **`ready`**：驱动方确认目标 VM 已就绪 | `handover_ready` + `o.require_ready` | **已实现**：`EPREFLIGHT_NOT_READY`；注意兜底提升**不受** A6 约束（owner 已死时无人能声明 ready），只受 A3/A4/B3 约束 |
@@ -503,8 +504,14 @@ watcher: 订阅 src 与 dst 两个 CH 的事件通道
    所以自然路径上闭合窗口的是**兜底提升**，不是显式 commit。**推荐的调用点因此改为**：
    控制器应当把"目标端注册"当作可供判断的**最后**时机；若需要在切换前完成判断，
    必须启用下面的"绑定式预检"。
-3. **绑定式预检（下一步，见 §9.6）**：把预检从"劝告性"变成"约束性"——目标端注册的应答
-   要挂住到控制器决定为止。这是让领导要求的"缺东西就保持旧环境"成为**强制**语义的唯一办法。
+3. **绑定式预检（已实现并实测，2026-09-25）**：`--handover-block-registration` 把目标端注册的
+   应答挂住到控制器决定为止（释放 ownership 锁、条件变量 park）。实测：控制器 `commit` 在
+   暂存后 25 ms 放行、downtime 59 ms、md5 一致（`usb-b2`）；否决路径（不 commit，由 supervisor
+   终止目标端）源端全程持有中断线、复制跑完且 md5 一致（`usb-b4`）。
+   **关键限制（必须写进部署文档）**：vfio-user 客户端**只读应答头、不看错误标志**，所以
+   "拒绝"无法通过应答传达——拒绝的执行者是**持有目标 VMM 的 supervisor**（终止它）。
+   usbvfiod 能给的是"没有 commit 就不装线"。绑定生效需要控制面**确实出现过**（选项②），
+   否则自动降级为旧行为（状态里 `binding=true controller=false`）。
 4. **回滚的传输语义**：reclaim 时，源端可能有在途传输已由设备完成但未送达源端，
    kick 能否覆盖需要实测（与现有 kick 同源风险）。目前只有事件计数（窗口内 0–3 个）
    与端到端 md5 一致作为间接证据。

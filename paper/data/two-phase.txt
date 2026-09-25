@@ -26,3 +26,6 @@ exposed 3
 commit_ms 23.9
 reclaim_enumerations 0
 reclaim_errors 0
+# usb-b2: binding mode, the commit released the parked registration (25 ms after
+# the staging) and the migration's reported downtime
+bind_downtime_ms 59

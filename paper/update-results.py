@@ -474,6 +474,7 @@ def main() -> int:
             f"\\newcommand{{\\TwoPhaseCommitMs}}{{{val('commit_ms')}}}",
             f"\\newcommand{{\\ReclaimEnumerations}}{{{val('reclaim_enumerations')}}}",
             f"\\newcommand{{\\ReclaimErrors}}{{{val('reclaim_errors')}}}",
+            f"\\newcommand{{\\BindDowntimeMs}}{{{val('bind_downtime_ms')}}}",
             "",
         ]
     else:

@@ -1289,5 +1289,33 @@ watch 拿到候选 → ready+commit 用时 25.4 ms，park 在 25 ms 后被放行
 对比 D26.3 的结论（未绑定模式下控制器两次往返 23.9 ms 输给 3.7–8.3 ms 的切换）：
 **binding 把决策点移到了切换之前，控制器从此真正参与**。
 
-**T14 / BINDING=1 否决路径（`usb-b3`）**：控制器不 commit、改由 supervisor 终止目标端 →
-见下节实测记录（与 D26.2 的 `usb-f2/usb-v2` 同判定标准：源端 owner 不变、md5 一致、0 重枚举/0 IO 错误）。
+**否决路径 / BINDING=1（`usb-b4`，`VETO=1`）：VERDICT PASS**
+
+```
+hand-over candidate: client 1 staged (owner 0 keeps the line until commit)   ← 挂住
+client 1 may not proceed: no hand-over decision within 2s; the device stays with the running guest
+migration outcome=failed   mode=vetoed   copy continued after failure: YES
+md5 MATCH   0 重枚举   0 reset/IO 错误
+```
+
+控制器先 `--handover-watch`（这一步同时让它成为"控制面"，binding 才会生效）→ 拿到候选 →
+决定"不"，由 supervisor 终止目标端 VMM → CH 记 `migration-failed` 并恢复源端 → 源端 guest
+把复制跑完且 md5 一致。**从未装线**，源端连接与中断线全程未动。
+
+两个细节值得记下：
+
+1. **钩子式的 `KILL_DST_ON_REGISTRATION=1` 在 binding 下不构成否决**（`usb-b3` 是反例）：
+   它只 grep 日志就去 kill，**从没跟控制 socket 说话**，于是 `controller_seen=false`，
+   binding 按选项②正确降级 → 没有 park → 迁移照常完成（那次 aftermath 是 `owner=- epoch=3`）。
+   这不是缺陷，而是"没有控制面就不绑定"的正面证据；因此否决必须由**真正的控制器**发起（`VETO=1`）。
+2. **park 期间收不到 socket 死亡的通知**：b4 里 park 一直等到自己的 2 s 窗口结束才放行
+   （日志 `no hand-over decision within 2s`）。这没关系——它放行时**什么都不装**，
+   源端在此期间一直是 owner；但要在文档里写明这是"死连接上多等一个窗口"的代价。
+
+### D29.5 为什么 A3 必须在 binding 下后置（用 b1/b2 的日志钉死）
+
+| 运行 | 时序 | 结论 |
+|---|---|---|
+| `usb-b1`（binding，A3 仍前置） | 42.255565 暂存 → 42.295550 预检看到候选已发布 `[]` → commit 被拒 → **44.256181 dma_map**（= park 窗口 2000 ms 耗尽、应答放行之后才到） | park 期间目标端**根本无法** map：CH 对 vfio-user client 是串行的，`DmaMap` 排在 `SetIrqs` 的应答后面 |
+| `usb-b2`（binding，A3 后置） | 24.291575 暂存 → 24.331742 commit（40 ms）→ 24.331878 `may proceed` → **24.332177 dma_map**（放行后 0.4 ms） | 后置是正确的：commit 成功、downtime 59 ms、md5 MATCH、VERDICT PASS |
+| `usb-b3`（binding 降级，未 park） | 暂存后 **0.17 ms** 就 dma_map | 不 park 时 map 紧跟注册——与 b1/b2 并不矛盾：不是"CH 总是晚 map"，而是"被 park 时 map 被排在应答之后" |

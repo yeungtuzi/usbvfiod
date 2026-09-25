@@ -1072,15 +1072,43 @@ destination runs with no line installed - is \TwoPhaseWindowMin--%
 \TwoPhaseWindowMax\,ms, with \TwoPhaseExposed{} exposed transfer completions that
 the install-time kick covers.
 
-The measurements also show where the controller's explicit \code{commit} sits in
-this VMM's flow. In the one run in which it won the race it closed the window
-\TwoPhaseCommitMs\,ms after the staging, but that takes two round trips
-(\code{ready}, then \code{commit}) while the source is torn down after
-\TwoPhaseTeardownMs\,ms, so the automatic fallback is what closes the natural
-case. Making the preflight \emph{binding} rather than advisory therefore needs
-the destination's registration reply to be held until the controller has decided,
-which is precisely the injection this experiment uses to hold the window open,
-and which we leave as the next step.
+Where the controller's explicit \code{commit} sits in this VMM's flow then
+became measurable, and the answer was uncomfortable: in the one unbounded run in
+which it won the race it closed the window \TwoPhaseCommitMs\,ms after the
+staging, but that takes two round trips (\code{ready}, then \code{commit}) while
+the source is torn down after \TwoPhaseTeardownMs\,ms, so the automatic fallback
+- not the controller - closed the natural case.
+
+\paragraph{Making the decision binding.}
+The lever turned out to be the reply itself. A VMM activates the destination's
+device with a command we answer and does not deactivate the source until that
+answer arrives - measured: a 300\,ms delay in the reply produced a 319\,ms
+migration downtime, an 8\,s delay an 8021\,ms one - so holding the reply puts
+the decision in front of the switchover. With
+\code{-{}-handover-block-registration} the registration is parked (the ownership
+lock is released while parked, so the control socket stays usable) until the
+controller commits, which \emph{installs the line and releases it}, or until the
+preflight window expires, which releases nothing and leaves the device with the
+running guest. A measured run: staged, committed 25\,ms later, the parked
+registration released by that commit, downtime \BindDowntimeMs\,ms, matching
+digest, zero re-enumerations, and the source's eventfd never kicked while the
+destination was parked.
+
+Two things this mode has to admit. First, \emph{a refusal cannot be delivered
+through the reply}: the vfio-user client reads only the reply header and ignores
+its error flag (the server does set it), so the destination VMM sees success
+either way. Turning a refusal into a failed migration is therefore the job of
+whoever owns the destination VMM - terminating it closes the socket - and that
+path is measured too: the controller refuses, the destination is terminated
+during its parked activation, Cloud Hypervisor logs \code{Migration failed} and
+resumes the source, and the source guest finishes its copy with the correct
+digest, with zero re-enumerations and zero I/O errors. usbvfiod's guarantee is
+the one it can keep: no commit, no install. Second, the DMA-coverage
+precondition cannot be evaluated at commit time in this mode: a VMM's
+\code{DmaMap} is serialised behind the activation reply it is waiting for
+(measured: it arrived 2.0\,s after the staging, exactly when the park window
+expired), so the status reports the condition as deferred and the automatic
+fallback keeps checking it.
 
 \subsection{Defects found}
 Table~\ref{tab:defects} lists the four things that had to be fixed: the
