@@ -1072,8 +1072,9 @@ status 查询会被同一次注册串行化，等它拿到状态时候选已经�
 - 论文：`paper/main.pdf`（14 页，0 error；新增 §Two-phase device hand-over、
   §Failure recovery with the two-phase hand-over，并重写"Failure and rollback"限制段）；
   数字经 `paper/data/two-phase.txt` + `update-results.py` 生成，未手写。
-- 匿名快照：`/root/lvllm/usbvfiod-anonymous.tar.gz`
-  sha256 `bbe50b5a057599b3b1a3bfe4273a49396dc259173d442cafd21ce4efb821e4bf`。
+- 匿名快照：`/root/lvllm/usbvfiod-anonymous.tar.gz`，其 sha256 由
+  `docs/make-anonymous-snapshot.sh` 打印并同时写入同名 `.sha256` 文件
+  （**不在这里写死**：快照内容包含本文件，写死摘要会让"改摘要"本身改变摘要）。
 
 ### D27.3 自查事故：匿名快照差点带着 fork 账号名出包
 
