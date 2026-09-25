@@ -1079,6 +1079,13 @@ staging, but that takes two round trips (\code{ready}, then \code{commit}) while
 the source is torn down after \TwoPhaseTeardownMs\,ms, so the automatic fallback
 - not the controller - closed the natural case.
 
+The delivered implementation was then run as an equivalence arm of its own:
+\FinalPass{} of \FinalRuns{} migrations with the code that ships, all with
+matching digests, no re-enumerations and no I/O errors, a median downtime of
+\FinalDowntimeMedian\,ms and a median copy time of \FinalCopyMedian\,s
+(exact 95\,\% interval \FinalCPLow--\FinalCPHigh) - i.e.\ the hand-over rework did
+not cost a single successful migration.
+
 \paragraph{Making the decision binding.}
 The lever turned out to be the reply itself. A VMM activates the destination's
 device with a command we answer and does not deactivate the source until that

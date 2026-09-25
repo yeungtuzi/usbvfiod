@@ -1349,3 +1349,29 @@ md5 MATCH   0 重枚举   0 reset/IO 错误
    guest，它崩了 guest 就没了（这与 usbvfiod 无关，任何 live migration 都一样）。usbvfiod 能保证
    且已验证的是**设备不会留在死连接上**（变 unowned，下一个注册立即接管）。
    `usb-b5` 是这一限制的反例证据，保留原始日志，不当作成功。
+
+## D31. 交付版本的等价性批次：10/10 通过（本轮补的最后一块证据）
+
+目标里"正常迁移仍然完全成功（与现有 20/20 等价）"此前只有零散的单次成功运行支撑。
+本轮用**交付代码**跑了 10 次完整真机迁移（`guest/acceptance-batch.sh`，与既有批次同一套判定）：
+
+```
+=== final-default: 10/10 passed ===
+  pass proportion      : 1.000   95% Clopper-Pearson [0.692, 1.000]
+  upper bound on failure rate (rule of three): <= 0.300
+  downtime ms          : min 10 / median 16.5 / max 19   (bootstrap 95% median CI [16, 18])
+  copy s               : min 48.9 / median 56.0 / max 57.0
+  interrupt lines installed per run: min 3 / max 3
+  stale teardowns ignored per run  : min 0 / max 0
+```
+
+判定标准与既有批次一致（复制跨越整个迁移、md5 与期望一致、失败后零重枚举、零 reset/IO 错误），
+原始 CSV 与每轮日志保留在 `/root/.dsh-tmp/usb-batch-final/`（`results-final-default.csv`
+已复制到 `/root/usb-runs/` 供论文生成宏）。论文新增等价性段落与宏
+（`\FinalRuns/\FinalPass/\FinalCopyMedian/\FinalDowntimeMedian/\FinalCPLow/\FinalCPHigh`），
+`update-results.py` 新增 `final-default` 臂。
+
+> 说明：这一批是**默认配置**（binding 关闭）跑的，正是"与既有 20/20 等价"所指的配置。
+> binding 模式的证据是单次真机 PASS（`usb-b2`）+ 否决路径 PASS（`usb-b4`）+
+> 18 个无 guest 测试；若要把 binding 也扩成批次，只需 `EXTRA_ENV="BINDING=1"` 再跑一遍，
+> 属于下一轮可选的加固。
