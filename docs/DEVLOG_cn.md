@@ -1216,3 +1216,78 @@ commit/abort/reclaim 与 watch，但**察觉不到迁移失败**，只能依赖�
    而守卫所在的 `bash -c` 命令行里就含这个字符串，于是永远判定"在跑"，两次静默跳过运行
    （方括号技巧也救不了，因为命令行里出现的是真实脚本路径）。改用 `pgrep -x cloud-hypervisor`
    这种不会自匹配的模式。
+
+## D29. M6 绑定式预检：实现 + 真机实测（用户批准后执行）
+
+### D29.1 先发现一件改变设计的事实：VMM 看不见我们回的"错误"
+
+准备 M6 时先读了 vfio-user 客户端（CH 用的那份，`/root/lvllm/vfio/vfio-user/src/lib.rs`，
+即 CH `[patch.crates-io]` 指的那份）：
+
+```rust
+let mut reply = Header::default();
+self.stream.read_exact(reply.as_mut_slice())?;   // 只读头，不看 HeaderFlags::Error
+Ok(())
+```
+
+服务端（`vfio_user` crate）**确实**会回 `HeaderFlags::Error`，但客户端**从不检查**。
+所以"给目标端 `SetIrqs` 回一次错误，让 CH 判设备激活失败"这条路**不通**——CH 照样返回 Ok。
+
+**但这不影响 M6，因为 M6 真正需要的杠杆早就被实测过了**：CH 会**阻塞等待**这个应答。
+证据在 D25/D26 的注入实验里：`USBVFIOD_INJECT_STAGING_DELAY_MS=300` → 迁移 downtime 319 ms；
+`=8000` → downtime 8021 ms，两次迁移最终都完成了。也就是说"挂住应答"= **把切换点往后推**，
+这正是控制器需要的窗口。
+
+因此 M6 的语义定为（并写进代码注释/文档）：
+
+| 控制器的决定 | usbvfiod 的动作 | 谁来让迁移失败 |
+|---|---|---|
+| `commit` | 装线 + 放行（应答 `Ok`） | —— 迁移正常完成，**由控制器闭合交接** |
+| `abort` / 窗口耗尽 / 预检不过 | **绝不装线**，放行但什么都不装（应答仍是 `Ok`） | **VMM 的持有者**（supervisor）终止目标端 VMM → socket 死亡 → CH 记 `Migration failed` → 恢复源端 |
+
+usbvfiod 能给的保证是它给得起的那条：**没有 commit，就不装线**；拒绝的执行权在"谁拥有目标 VMM"，
+不在设备后端（因为客户端不看错误码）。
+
+### D29.2 实现（`--handover-block-registration`，默认关）
+
+- 暂存候选后**释放 ownership 锁**、在条件变量上 park，应答被挂住到：
+  `commit`（装线并放行）/ 候选消失（abort/被替换）/ `preflight_timeout` 耗尽（清掉候选并放行）。
+- **选项②降级**：只有"控制面确实出现过"（任何 hand-over 命令都算）才挂；否则保持旧行为，
+  并在状态里报 `binding=true controller=false`。`--handover-require-controller=true` 可改成 fail-closed。
+- 状态新增 `binding=` / `controller=` / `deferred_a3=`，便于运维与 harness 断言。
+- 3+1 个测试：commit 放行（源端在 park 期间 0 kick）／窗口耗尽（挂满窗口、什么都不装、owner/epoch 不变）／
+  无控制器降级（立即放行）／**真实 VMM 顺序**（先注册后 map，commit 必须成功）。
+
+### D29.3 真机第一跑就抓到一个顺序陷阱（已修）
+
+`BINDING=1` 的第一次 T1：控制器 `watch` 拿到候选、`ready` 成功、但 **`commit` 被 A3 拒绝**：
+
+```
+remote log: … | Error: EPREFLIGHT_A3_DMA_INCOMPLETE
+Migration completed after 2.0s with a downtime of 2019ms；md5 MISMATCH；VERDICT FAIL
+```
+
+根因：**VMM 的 `DmaMap` 在它设备激活的应答之后**（实测 0.06–0.3 ms）。binding 把应答挂住，
+于是 map 也被挂在后面——**A3 在 commit 时刻永远不可能满足**。修法：binding 生效时暂停 A3，
+并在状态里如实报 `deferred_a3=true`；A4/A5/B3 仍然强制，兜底提升仍然检查 A3。
+（论文里也要写：绑定式预检把 A3 从"前置"变成"后置"。）
+
+### D29.4 真机结果
+
+**T1 / BINDING=1（`usb-b2`）：VERDICT PASS**，而且这次是**控制器闭合的交接**：
+
+```
+hand-over candidate: client 1 staged (owner 0 keeps the line until commit)
+hand-over committed: owner 0 -> 1 (epoch 2)
+client 1 may proceed: the hand-over was committed (epoch 2)      ← 挂住的注册被 commit 放行
+status after commit : owner=1 prev=0 candidate=- epoch=2  deferred_a3=true
+Migration completed after 0.1s with a downtime of 59ms
+md5 MATCH   0 重枚举   0 reset/IO
+```
+
+watch 拿到候选 → ready+commit 用时 25.4 ms，park 在 25 ms 后被放行；downtime 59 ms（预算 2000 ms）。
+对比 D26.3 的结论（未绑定模式下控制器两次往返 23.9 ms 输给 3.7–8.3 ms 的切换）：
+**binding 把决策点移到了切换之前，控制器从此真正参与**。
+
+**T14 / BINDING=1 否决路径（`usb-b3`）**：控制器不 commit、改由 supervisor 终止目标端 →
+见下节实测记录（与 D26.2 的 `usb-f2/usb-v2` 同判定标准：源端 owner 不变、md5 一致、0 重枚举/0 IO 错误）。

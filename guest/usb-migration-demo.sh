@@ -285,6 +285,29 @@ wait_migration_outcome() {
   printf 'unknown\n'
 }
 
+# The controller's veto. It first makes itself known on the control socket - in
+# binding mode that is also what makes usbvfiod hold the destination's device
+# activation - waits for the staging, then decides *no* and has the destination
+# VMM terminated. The termination is what turns the refusal into a failed
+# migration: a vfio-user client only reads the reply header and ignores its error
+# flag, so a refusal cannot be delivered through the reply itself.
+veto_destination() {
+  local reply
+  reply="$("$REMOTE" --socket "$RUN/hotplug.sock" --handover-watch 30000 2>&1)"
+  printf '%s\n' "$reply" > "$RUN/handover.watch"
+  if ! printf '%s' "$reply" | grep -qE 'candidate=[0-9]+'; then
+    log "VETO: no candidate appeared; nothing to refuse"
+    printf 'no-candidate\n' > "$RUN/handover.mode"
+    return 1
+  fi
+  date +%s.%N > "$RUN/handover.candidate"
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.staged" 2>&1
+  log "VETO: refusing the hand-over and terminating the destination VMM (pid $DST_CH_PID)"
+  kill -9 "$DST_CH_PID" 2>/dev/null
+  printf 'vetoed\n' > "$RUN/handover.mode"
+  return 1
+}
+
 # If the migration did not take, the device has to go back to the source. When
 # the failure happened before the commit nothing moved and this is a no-op that
 # the server refuses with ERECLAIM_NOT_PREVIOUS_OWNER; when it happened after the
@@ -388,7 +411,9 @@ MIGRATION_EPOCH=$(date +%s.%N)
   send-migration destination_url=unix:"$RUN/mig.sock",memory_mode=memfds,downtime_ms=300,timeout_strategy=cancel \
   > "$RUN/send.log" 2>&1 &
 SEND_PID=$!
-if [ "${KILL_DST_ON_REGISTRATION:-0}" = "1" ]; then
+if [ "${VETO:-0}" = "1" ]; then
+  veto_destination
+elif [ "${KILL_DST_ON_REGISTRATION:-0}" = "1" ]; then
   kill_destination_on_registration
 else
   handover_controller
