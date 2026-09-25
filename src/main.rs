@@ -23,7 +23,7 @@ use async_runtime::init_runtime;
 use clap::Parser;
 use cli::Cli;
 use device::{pcap::UsbPcapManager, xhci::real_device::CompleteRealDevice};
-use hotplug_server::run_hotplug_server;
+use hotplug_server::{run_hotplug_server, LocalDevice};
 use shared_backend::SharedBackendState;
 use tracing::{debug, error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
     init_runtime().context("Failed to initialize async runtime")?;
     let runtime = runtime();
 
-    let mut backend = xhci_backend::XhciBackend::new(runtime.clone())
+    let backend: XhciBackend<LocalDevice> = xhci_backend::XhciBackend::new(runtime.clone())
         .context("Failed to create virtual XHCI controller")?;
     for device in &args.devices {
         let path = device.as_path();
@@ -79,22 +79,53 @@ fn main() -> Result<()> {
         }
     });
 
+    // Two-phase ownership hand-over only exists once several vfio-user clients
+    // are served at once: with a single client there is nobody to hand over to,
+    // and the historical one-shot lifetime is preserved.
+    let runner = if args.max_clients > 1 {
+        let shared = Arc::new(SharedBackendState::new(backend));
+        shared.configure_handover(
+            Some(Duration::from_millis(args.handover_lease_ms)),
+            Some(Duration::from_millis(args.handover_preflight_timeout_ms)),
+            Some(args.handover_require_ready),
+            Some(args.handover_auto_reclaim),
+        );
+        info!(
+            "two-phase hand-over enabled: preflight timeout {} ms, reclaim lease {} ms, require-ready {}, auto-reclaim {}",
+            args.handover_preflight_timeout_ms,
+            args.handover_lease_ms,
+            args.handover_require_ready,
+            args.handover_auto_reclaim
+        );
+        Runner::Multi(shared)
+    } else {
+        Runner::Single(Box::new(backend))
+    };
+
     if let Some(socket) = args.hotplug_socket() {
-        let hotplug_control = backend.hotplug_control();
+        let hotplug_control = match &runner {
+            Runner::Single(backend) => backend.hotplug_control(),
+            Runner::Multi(shared) => shared.hotplug_control(),
+        };
+        let handover = match &runner {
+            Runner::Single(_) => None,
+            Runner::Multi(shared) => Some(Arc::clone(shared)),
+        };
         thread::Builder::new()
             .name("hot-attach-socket listener".to_string())
-            .spawn(move || run_hotplug_server(socket, hotplug_control, runtime.clone()))
+            .spawn(move || run_hotplug_server(socket, hotplug_control, runtime.clone(), handover))
             .unwrap();
     }
 
     info!("We're up!");
 
-    if args.max_clients > 1 {
-        run_multi_client(server, backend, args.max_clients)?;
-    } else {
-        server
-            .run(&mut backend)
-            .context("Failed to start vfio-user server")?;
+    match runner {
+        Runner::Multi(shared) => run_multi_client(server, shared, args.max_clients)?,
+        Runner::Single(mut backend) => {
+            server
+                .run(backend.as_mut())
+                .context("Failed to start vfio-user server")?;
+        }
     }
 
     if let Some(hotplug_socket_path) = args.hotplug_socket_path {
@@ -106,6 +137,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Which serving mode this process runs in.
+enum Runner<CRD: CompleteRealDevice> {
+    /// Historical behaviour: exactly one vfio-user client, process exits when it
+    /// disconnects. No hand-over is possible, so no ownership state exists.
+    Single(Box<XhciBackend<CRD>>),
+    /// Several clients at once, with two-phase ownership hand-over.
+    Multi(Arc<SharedBackendState<CRD>>),
+}
+
 /// Serve up to `max_clients` concurrent vfio-user clients.
 ///
 /// The destination VMM of a same-host live migration connects while the source
@@ -114,10 +154,9 @@ fn main() -> Result<()> {
 /// disconnects; stop it explicitly (or through systemd socket activation).
 fn run_multi_client<CRD: CompleteRealDevice>(
     server: Arc<Server>,
-    backend: XhciBackend<CRD>,
+    shared: Arc<SharedBackendState<CRD>>,
     max_clients: usize,
 ) -> Result<()> {
-    let shared = Arc::new(SharedBackendState::new(backend));
     let mut handles = Vec::with_capacity(max_clients);
 
     for index in 0..max_clients {
@@ -128,7 +167,13 @@ fn run_multi_client<CRD: CompleteRealDevice>(
             .spawn(move || {
                 loop {
                     let mut shared_backend = shared.connect();
-                    if let Err(err) = server.run(&mut shared_backend) {
+                    let id = shared_backend.connection_id();
+                    let result = server.run(&mut shared_backend);
+                    // The connection is gone: if it was the committed owner and a
+                    // previous owner is still around, this is where the device
+                    // goes back (see `SharedBackendState::disconnect`).
+                    shared.disconnect(id);
+                    if let Err(err) = result {
                         error!("vfio-user connection ended with error: {err}");
                         // Do not spin on a persistently failing listener.
                         thread::sleep(Duration::from_millis(100));

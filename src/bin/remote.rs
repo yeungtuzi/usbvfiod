@@ -20,7 +20,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Parser};
 use nusb::MaybeFuture;
 use usbvfiod::hotplug_protocol::{
-    command::Command, device_paths::resolve_path, response::Response,
+    command::Command,
+    device_paths::resolve_path,
+    handover::{HandoverCommand, HandoverReply, HandoverSnapshot},
+    response::Response,
 };
 
 fn main() -> Result<()> {
@@ -35,9 +38,94 @@ fn main() -> Result<()> {
         detach(bus, dev, args.socket.as_path())?;
     } else if args.list {
         list_attached(args.socket.as_path())?;
+    } else if args.handover_status {
+        report(handover(args.socket.as_path(), &HandoverCommand::Status)?)?;
+    } else if let Some(role) = args.handover_ready {
+        let conn = resolve_conn(args.socket.as_path(), &role)?;
+        report(handover(
+            args.socket.as_path(),
+            &HandoverCommand::Ready { conn },
+        )?)?;
+    } else if let Some(role) = args.handover_commit {
+        let snapshot = status(args.socket.as_path())?;
+        let conn = resolve(&snapshot, &role)?;
+        let reply = handover(
+            args.socket.as_path(),
+            &HandoverCommand::Commit {
+                conn,
+                epoch: snapshot.epoch,
+            },
+        )?;
+        report(reply)?;
+    } else if let Some(vec) = args.handover_abort {
+        // Safety: clap ensures that vec.len() is 1 or 2.
+        let role = &vec[0];
+        let reason = vec.get(1).cloned().unwrap_or_default();
+        let conn = resolve_conn(args.socket.as_path(), role)?;
+        report(handover(
+            args.socket.as_path(),
+            &HandoverCommand::Abort { conn, reason },
+        )?)?;
+    } else if let Some(role) = args.handover_reclaim {
+        let snapshot = status(args.socket.as_path())?;
+        let conn = resolve(&snapshot, &role)?;
+        let reply = handover(
+            args.socket.as_path(),
+            &HandoverCommand::Reclaim {
+                conn,
+                epoch: snapshot.epoch,
+            },
+        )?;
+        report(reply)?;
     }
 
     Ok(())
+}
+
+/// Send one hand-over command and read its answer.
+fn handover(socket_path: &Path, command: &HandoverCommand) -> Result<HandoverReply> {
+    let socket = UnixStream::connect(socket_path).context("Failed to open socket")?;
+    command
+        .send_over_socket(&socket)
+        .context("Failed to send the hand-over command over the socket")?;
+    HandoverReply::receive_from_socket(&socket).context("Failed to receive the hand-over reply")
+}
+
+/// Ask the server for the current ownership state.
+fn status(socket_path: &Path) -> Result<HandoverSnapshot> {
+    match handover(socket_path, &HandoverCommand::Status)? {
+        HandoverReply::Ok(body) => Ok(HandoverSnapshot::parse(&body)),
+        HandoverReply::Err { code, detail } => Err(anyhow!(
+            "the server refused a status query: {code}: {detail}"
+        )),
+    }
+}
+
+/// Resolve `owner`/`prev`/`candidate`/`<id>` to a connection id.
+///
+/// A numeric id needs no extra round trip, so it is answered locally.
+fn resolve_conn(socket_path: &Path, role: &str) -> Result<u64> {
+    if let Ok(id) = role.parse::<u64>() {
+        return Ok(id);
+    }
+    resolve(&status(socket_path)?, role)
+}
+
+fn resolve(snapshot: &HandoverSnapshot, role: &str) -> Result<u64> {
+    snapshot
+        .resolve(role)
+        .ok_or_else(|| anyhow!("no connection is currently {role:?} (see --handover-status)"))
+}
+
+/// Print a successful answer's payload; turn a refusal into an error exit.
+fn report(reply: HandoverReply) -> Result<()> {
+    match reply {
+        HandoverReply::Ok(body) => {
+            println!("{body}");
+            Ok(())
+        }
+        HandoverReply::Err { code, detail } => Err(anyhow!("{code}: {detail}")),
+    }
 }
 
 fn attach(device_path: &Path, socket_path: &Path) -> Result<()> {
@@ -139,7 +227,17 @@ fn list_attached(socket_path: &Path) -> Result<()> {
     version = env!("CARGO_PKG_VERSION"),
     author = env!("CARGO_PKG_AUTHORS"),
     about = env!("CARGO_PKG_DESCRIPTION"),
-    long_about = None
+    long_about = None,
+    group = clap::ArgGroup::new("action").required(true).multiple(false).args([
+        "attach",
+        "detach",
+        "list",
+        "handover_status",
+        "handover_ready",
+        "handover_commit",
+        "handover_abort",
+        "handover_reclaim",
+    ])
 )]
 struct Cli {
     /// Path to the hot-attach socket that the usbvfiod instances exposes.
@@ -168,4 +266,30 @@ struct Cli {
     /// This option is mutually exclusive with --attach and --detach.
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "attach", conflicts_with = "detach")]
     list: bool,
+
+    /// Print the two-phase ownership state (owner, previous owner, staged
+    /// candidate, epoch, readiness).
+    #[arg(long)]
+    handover_status: bool,
+
+    /// Declare the staged hand-over candidate ready, which is what allows a
+    /// commit. Arguments other than a number are resolved through a status
+    /// query, so `candidate` is usually what you want.
+    #[arg(long, value_name = "CONN")]
+    handover_ready: Option<String>,
+
+    /// Commit the staged hand-over: from here on the candidate owns the interrupt
+    /// line and the previous owner may reclaim within the lease.
+    #[arg(long, value_name = "CONN")]
+    handover_commit: Option<String>,
+
+    /// Drop the staged candidate. The incumbent is untouched, which is the right
+    /// answer to "the destination has a problem".
+    #[arg(long, value_name = "CONN", num_args = 1..=2)]
+    handover_abort: Option<Vec<String>>,
+
+    /// Give the device back to the previous owner after a committed hand-over
+    /// went wrong. Only the previous owner may reclaim, and only within the lease.
+    #[arg(long, value_name = "CONN")]
+    handover_reclaim: Option<String>,
 }

@@ -74,6 +74,38 @@ pub struct Cli {
     /// VMM is still connected.
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub max_clients: usize,
+
+    /// How long a vfio-user connection may stay a hand-over candidate before its
+    /// staged interrupt registration is discarded.
+    ///
+    /// The owner keeps the device for the whole window, so an expired candidate
+    /// is a no-op for the running guest. Only used with --max-clients > 1.
+    #[arg(long, value_name = "MS", default_value_t = 2000)]
+    pub handover_preflight_timeout_ms: u64,
+
+    /// How long the previous owner may reclaim the device after a hand-over was
+    /// committed. A reclaim is how a cancelled migration is rolled back. Only
+    /// used with --max-clients > 1.
+    #[arg(long, value_name = "MS", default_value_t = 5000)]
+    pub handover_lease_ms: u64,
+
+    /// Require the control channel to declare the destination ready before a
+    /// hand-over may be committed.
+    ///
+    /// With this on, a hand-over that nobody is driving cannot happen by
+    /// accident: the destination is staged and then left alone. Only used with
+    /// --max-clients > 1.
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set)]
+    pub handover_require_ready: bool,
+
+    /// Give the device back to the previous owner automatically if the committed
+    /// owner disappears within the reclaim lease.
+    ///
+    /// This is the unattended fallback for "the destination VMM crashed"; it
+    /// cannot fire after a successful migration, because the connection that
+    /// disappears then is the previous owner. Only used with --max-clients > 1.
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set)]
+    pub handover_auto_reclaim: bool,
 }
 
 /// The location of the server socket for the vfio-user client connection.

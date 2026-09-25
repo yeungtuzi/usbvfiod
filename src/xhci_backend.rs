@@ -33,6 +33,25 @@ use crate::device::{
 
 use crate::{dynamic_bus::DynamicBus, memory_segment::MemorySegment};
 
+/// Validate an interrupt-registration request without touching the device.
+///
+/// The same checks are needed when a second client registers while another one
+/// still owns the line: that request is staged as a candidate rather than
+/// applied, but a malformed request must still be rejected immediately. Return
+/// errors rather than panicking: the request comes from a client connection, and
+/// a malformed request must not take the thread (or the controller) down.
+pub fn validate_irq_request(index: u32, count: u32) -> Result<(), std::io::Error> {
+    if index != VFIO_PCI_MSIX_IRQ_INDEX {
+        return Err(std::io::Error::other("only MSI-X interrupts are supported"));
+    }
+    if count > 1 {
+        return Err(std::io::Error::other(
+            "only a single interrupt is supported",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct XhciBackend<CRD: CompleteRealDevice> {
     dma_bus: Arc<DynamicBus>,
@@ -351,17 +370,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for XhciBackend<CRD> {
             "set IRQs: {index} flags: {flags:#x} start: {start:#x} count: {count:#x} #fds: {}",
             fds.len()
         );
-        // Return errors rather than panicking: the request comes from a client
-        // connection, and a malformed request must not take the thread (or the
-        // controller) down.
-        if index != VFIO_PCI_MSIX_IRQ_INDEX {
-            return Err(std::io::Error::other("only MSI-X interrupts are supported"));
-        }
-        if count > 1 {
-            return Err(std::io::Error::other(
-                "only a single interrupt is supported",
-            ));
-        }
+        validate_irq_request(index, count)?;
 
         let irqs: Vec<Arc<InterruptEventFd>> = fds
             .into_iter()
