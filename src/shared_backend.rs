@@ -141,6 +141,7 @@ pub enum HandoverError {
     BadEventFd,
     DeviceGone,
     DmaIncomplete,
+    IrqMismatch,
     NotPreviousOwner,
     PreviousGone,
     EpochMismatch,
@@ -162,6 +163,10 @@ impl fmt::Display for HandoverError {
             Self::DeviceGone => write!(
                 f,
                 "no USB device is attached any more, so there is nothing to hand over"
+            ),
+            Self::IrqMismatch => write!(
+                f,
+                "the candidate registered a different interrupt vector than the owner"
             ),
             Self::DmaIncomplete => {
                 write!(f, "the candidate has not mapped the device's DMA ranges")
@@ -189,6 +194,7 @@ impl HandoverError {
             Self::NotReady => "EPREFLIGHT_NOT_READY",
             Self::BadEventFd => "EPREFLIGHT_A4_EVENTFD",
             Self::DeviceGone => "EPREFLIGHT_A5_DEVICE_GONE",
+            Self::IrqMismatch => "EPREFLIGHT_B3_IRQ_MISMATCH",
             Self::DmaIncomplete => "EPREFLIGHT_A3_DMA_INCOMPLETE",
             Self::NotPreviousOwner => "ERECLAIM_NOT_PREVIOUS_OWNER",
             Self::PreviousGone => "ERECLAIM_PREV_GONE",
@@ -719,6 +725,22 @@ fn preflight_hard(
     }
     if o.require_device && o.device_count == Some(0) {
         return Err(HandoverError::DeviceGone);
+    }
+    // B3: the destination has to configure the same interrupt vector as the
+    // source. A different MSI-X index or vector range means the two VMMs do not
+    // agree about the device, and handing it over would signal the guest through
+    // a line its driver never installed.
+    if let Some(owner) = o.owner_reg.as_ref() {
+        if (cand.reg.index, cand.reg.start, cand.reg.count)
+            != (owner.index, owner.start, owner.count)
+        {
+            info!(
+                "preflight: candidate {} registered index {} start {} count {}, the owner has index {} start {} count {}",
+                cand.id, cand.reg.index, cand.reg.start, cand.reg.count,
+                owner.index, owner.start, owner.count
+            );
+            return Err(HandoverError::IrqMismatch);
+        }
     }
     let cand_ranges = o.mapped.get(&cand.id).cloned().unwrap_or_default();
     if !ranges_cover(&cand_ranges, owner_ranges) {

@@ -16,6 +16,11 @@
 # guest tty, so the *authoritative* result is read from the guest's own
 # /root/demo.log after stopping the VMs and mounting the disk image.
 #
+# The VMM's event stream is delivered to us over a socketpair (`--event-monitor
+# fd=`), not through a file we tail: `guest/ch-with-events.py` owns the read end
+# and republishes the events as flushed `<source>/<event>` lines, so a decision
+# here can react to what the VMM reports without racing a block buffer.
+#
 # The device hand-over is driven from here, not from the VMM. usbvfiod stages
 # the destination's interrupt registration as a *candidate* and only installs it
 # when the control socket says so, so the harness is the one that decides when
@@ -176,7 +181,7 @@ handover_controller() {
   # staging exists for, so nothing may be committed here.
   if [ "${KILL_DST_WHEN_STAGED:-0}" = "1" ]; then
     log "hand-over: INJECTED FAILURE: killing the destination while it is only staged"
-    kill -9 "$DST_PID" 2>/dev/null
+    kill -9 "$DST_CH_PID" 2>/dev/null
     printf 'destination-died-while-staged\n' > "$RUN/handover.mode"
     return 1
   fi
@@ -187,7 +192,7 @@ handover_controller() {
   # for the event makes the order explicit instead of assumed.
   local j=0
   while [ "$j" -lt 400 ]; do
-    grep -q '"event": "paused"' "$RUN/src.events" 2>/dev/null && break
+    grep -qE ' vm/paused( |$)' "$RUN/src.events.lines" 2>/dev/null && break
     sleep 0.025; j=$((j + 1))
   done
 
@@ -208,7 +213,7 @@ handover_controller() {
       log "hand-over: committed; owner is now $(status_field owner), previous owner $(status_field prev)"
       if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ]; then
         log "hand-over: INJECTED FAILURE: killing the destination VMM after the commit"
-        kill -9 "$DST_PID" 2>/dev/null
+        kill -9 "$DST_CH_PID" 2>/dev/null
       fi
       ;;
     *)
@@ -232,7 +237,7 @@ kill_destination_on_registration() {
   fi
   date +%s.%N > "$RUN/handover.candidate"
   log "INJECTED FAILURE: the destination has registered as a candidate; killing it"
-  kill -9 "$DST_PID" 2>/dev/null
+  kill -9 "$DST_CH_PID" 2>/dev/null
   printf 'destination-died-after-registering\n' > "$RUN/handover.mode"
   return 1
 }
@@ -246,18 +251,18 @@ kill_destination_on_registration() {
 # Order matters: a failed migration also emits `shutdown` later, so a failure
 # marker must win over it.
 wait_migration_outcome() {
-  local i=0
+  local i=0 lines="$RUN/src.events.lines"
   while [ "$i" -lt 900 ]; do
-    if grep -q '"event": "migration-failed"' "$RUN/src.events" 2>/dev/null; then
+    if grep -qE ' vm/migration-failed( |$)' "$lines" 2>/dev/null; then
       printf 'failed\n'; return 0
     fi
-    if grep -q '"event": "resumed"' "$RUN/src.events" 2>/dev/null; then
+    if grep -qE ' vm/resumed( |$)' "$lines" 2>/dev/null; then
       printf 'resumed\n'; return 0
     fi
-    if grep -q '"event": "shutdown"' "$RUN/src.events" 2>/dev/null; then
+    if grep -qE ' vm/shutdown( |$)' "$lines" 2>/dev/null; then
       # The source is gone; look once more for a failure marker before calling
       # this a successful migration.
-      if grep -qE '"event": "(migration-failed|resumed)"' "$RUN/src.events" 2>/dev/null; then
+      if grep -qE ' vm/(migration-failed|resumed)( |$)' "$lines" 2>/dev/null; then
         printf 'failed\n'; return 0
       fi
       printf 'shutdown\n'; return 0
@@ -303,7 +308,8 @@ else
 fi
 
 # --- 2. source VM: guest boots and starts copying from the stick -------------
-"$CH" -v --api-socket "$RUN/src.sock" --event-monitor "path=$RUN/src.events" \
+python3 "$DIR/ch-with-events.py" --events "$RUN/src.events" -- \
+  "$CH" -v --api-socket "$RUN/src.sock" \
   --memory size=2G,shared=on --cpus boot=1 \
   --kernel "$DIR/casper/vmlinuz" --initramfs "$DIR/initrd-custom.gz" \
   --disk "path=$DIR/rootfs.img,image_type=raw" \
@@ -312,6 +318,7 @@ fi
   --cmdline "root=/dev/vda rw console=ttyS0" > "$RUN/src.log" 2>&1 &
 SRC_PID=$!; pids+=($SRC_PID)
 wait_api "$RUN/src.sock" source || exit 1
+SRC_CH_PID="$(cat "$RUN/src.events.pid" 2>/dev/null || echo "$SRC_PID")"
 step "2/6 source VM booted; guest will mount the stick and start copying"
 wait_for "DEMO-COPY: COPY_START" "$RUN/console.log" "$BOOT_TIMEOUT" || {
   log "ERROR: the guest never started copying"; tail -40 "$RUN/console.log"; exit 1
@@ -320,9 +327,11 @@ step "3/6 copy in flight; starting the destination"
 [ "${COPY_LEAD_SECONDS}" != "0" ] && sleep "$COPY_LEAD_SECONDS"
 
 # --- 3. destination VM + live migration -------------------------------------
-"$CH" -v --api-socket "$RUN/dst.sock" --event-monitor "path=$RUN/dst.events" > "$RUN/dst.log" 2>&1 &
+python3 "$DIR/ch-with-events.py" --events "$RUN/dst.events" -- \
+  "$CH" -v --api-socket "$RUN/dst.sock" > "$RUN/dst.log" 2>&1 &
 DST_PID=$!; pids+=($DST_PID)
 wait_api "$RUN/dst.sock" destination || exit 1
+DST_CH_PID="$(cat "$RUN/dst.events.pid" 2>/dev/null || echo "$DST_PID")"
 "$CHR" --api-socket "$RUN/dst.sock" receive-migration receiver_url=unix:"$RUN/mig.sock" \
   > "$RUN/receive.log" 2>&1 &
 pids+=($!)
@@ -435,6 +444,8 @@ echo "status after staging      : $(cat "$RUN/handover.staged" 2>/dev/null || ec
 echo "status after commit       : $(cat "$RUN/handover.committed" 2>/dev/null || echo '<none>')"
 echo "remote log                : $(tr '\n' '|' < "$RUN/handover.log" 2>/dev/null)"
 echo "--- hand-over path evidence (server log) ---"
+echo "source VMM pid             : $SRC_CH_PID (relay $SRC_PID)"
+echo "destination VMM pid        : ${DST_CH_PID:-<not started>} (relay ${DST_PID:-<none>})"
 echo "client handshakes         : $(grep -ac 'Received client version' "$RUN/usbvfiod.log")"
 echo "interrupt lines installed : $(grep -ac 'interrupt line installed' "$RUN/usbvfiod.log")"
 echo "interrupt kicks issued    : $(grep -ac 're-raising one interrupt' "$RUN/usbvfiod.log")"

@@ -1073,3 +1073,39 @@ fn a_reclaim_after_the_lease_is_refused() {
     );
     src.assert_no_kick();
 }
+
+#[test]
+fn a_candidate_with_a_different_interrupt_vector_is_refused() {
+    // B3: the two VMMs must agree about which interrupt vector carries the
+    // device. A destination that registers a different range would be signalled
+    // through a line its guest driver never installed, so the hand-over refuses
+    // it and the incumbent keeps the device.
+    let server = Server::start("irq-mismatch", &["--handover-require-device", "false"]);
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let mut odd = Peer::connect(&server);
+    odd.prepare();
+    // Same index and count as the source, but a different start vector.
+    odd.client
+        .set_irqs(MSIX_IRQ_INDEX, 0, 1, 1, &[odd.efd.as_raw_fd()])
+        .expect("set_irqs with a different vector");
+    adopt(&server, &mut odd, |s| s.candidate);
+    expect_ok(&server, &HandoverCommand::Ready { conn: odd.id() });
+    expect_refusal(
+        &server,
+        &HandoverCommand::Commit {
+            conn: odd.id(),
+            epoch: boot_epoch,
+        },
+        "EPREFLIGHT_B3_IRQ_MISMATCH",
+    );
+    assert_eq!(status(&server).owner, Some(src.id()));
+    assert_eq!(status(&server).epoch, boot_epoch);
+    src.assert_no_kick();
+}
