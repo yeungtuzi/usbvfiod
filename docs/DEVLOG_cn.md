@@ -717,7 +717,7 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 1. 对第三方仓库（`cyberus-technology/*`、`rust-vmm/*`、`cloud-hypervisor/*` 等）**默认只读**：
    允许 `git clone/fetch/ls-remote`、读 PR/issue 页面；不允许任何写。
 2. **推送前先判断目标分支是否某个 PR 的 head**。若是 → 属于"间接写 PR"，必须先获批。
-3. 对自己的 fork（`yeungtuzi/*`）的主分支推送，若**不会**导致任何上游 PR 变化，
+3. 对自己的 fork（`<fork-owner>/*`）的主分支推送，若**不会**导致任何上游 PR 变化，
    视为保存工作所需的最小操作，但仍会在每次推送后明确报告"这次推送影响了什么"；
    只要用户要求，连这类推送也改为先批准。
 4. 任何需要批准的操作，一律**先停下来问**，不得因为"就差一步"而自行继续。
@@ -726,12 +726,12 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 
 | 对象 | 类型 | 内容 | 状态 |
 |---|---|---|---|
-| `cyberus-technology/usbvfiod` | PR **#316** | 多客户端 + 陈旧客户端保护 + dma_unmap/reset（head: `yeungtuzi:pr/multi-client`） | **draft，未提交评审**；本会话未再推送该 head 分支，PR 内容未变 |
-| `rust-vmm/vfio` | PR **#171** | `resettable` 解析取反修复（head: `yeungtuzi:fix/resettable-flag-parsing`） | 同上，draft，未变 |
+| `cyberus-technology/usbvfiod` | PR **#316** | 多客户端 + 陈旧客户端保护 + dma_unmap/reset（head: `<fork-owner>:pr/multi-client`） | **draft，未提交评审**；本会话未再推送该 head 分支，PR 内容未变 |
+| `rust-vmm/vfio` | PR **#171** | `resettable` 解析取反修复（head: `<fork-owner>:fix/resettable-flag-parsing`） | 同上，draft，未变 |
 
 以下操作**从未**执行：任何 issue、任何 comment、任何 review、任何非 fork 仓库的直接 push、任何标签推送。
 
-**本会话对 `origin`（`github.com/yeungtuzi/usbvfiod`，用户自己的 fork）的推送**：
+**本会话对 `origin`（`github.com/<fork-owner>/usbvfiod`，用户自己的 fork）的推送**：
 只推送 `main` 分支，**不会**更新上述两个 PR（它们的 head 分别是 `pr/multi-client`
 与 `fix/resettable-flag-parsing`）。若用户要求，后续连这类推送也先逐次批准。
 
@@ -743,14 +743,14 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 |---|---|---|
 | `gh pr close 316 --delete-branch` | `cyberus-technology/usbvfiod#316` | ✅ state=**CLOSED** |
 | `gh pr close 171 --delete-branch` | `rust-vmm/vfio#171` | ✅ state=**CLOSED** |
-| `git push origin --delete pr/multi-client` | `yeungtuzi/usbvfiod` | ✅ 已删除（该 fork 现仅剩 `main`） |
-| `git push origin --delete fix/resettable-flag-parsing` | `yeungtuzi/vfio` | ✅ 已删除 |
+| `git push origin --delete pr/multi-client` | `<fork-owner>/usbvfiod` | ✅ 已删除（该 fork 现仅剩 `main`） |
+| `git push origin --delete fix/resettable-flag-parsing` | `<fork-owner>/vfio` | ✅ 已删除 |
 
 说明：`gh` 对 fork 来的 PR 会跳过远程分支删除（提示 "Skipped deleting the remote branch of
 a pull request from fork"），因此分支是用 `git push --delete` 显式删除的；**未**创建任何
 issue/comment/review，**未**触碰上游仓库的任何代码或分支。
 
-**保留未动**：`yeungtuzi/vfio` 的 `demo/standalone-crate`（CH 的 `[patch.crates-io]` 指向它，
+**保留未动**：`<fork-owner>/vfio` 的 `demo/standalone-crate`（CH 的 `[patch.crates-io]` 指向它，
 论文复现需要）以及 `muislam/*`、`main`（非本次授权范围）。如需一并删除，请再单独指示。
 
 **此后流程**：任何对第三方仓库的写操作（PR/issue/comment/review/标签/分支，
