@@ -1149,3 +1149,70 @@ D26.3 已说明，这是让"缺东西就保持旧环境"成为**强制**语义�
 它是**行为变更**（没有控制器时迁移会在预检窗口后失败），所以按 D22 的纪律，
 我把它写成待批准项而没有自行实施。其余已知缺口：预检 A5（设备健康）仍无后端访问器；
 T3/T4/T8 注入用例未跑；原始日志尚未归档到 `/mnt/mt`。
+
+## D28. 控制器全面改为推送：CH 事件走 fd 订阅，候选出现走服务端 watch
+
+### D28.1 CH 事件：socketpair 订阅（`guest/ch-with-events.py`）
+
+按用户要求，把"tail 文件 + grep"换成**推送订阅**：`--event-monitor fd=<n>` 让 CH 收走我们
+socketpair 的一端（`File::from_raw_fd`），我们在另一端读。新工具 `guest/ch-with-events.py`
+把它包成 demo 的启动器，并同时产出三件东西：
+
+- `<events>`：**与 `path=` 逐字节相同**的原始 JSON 流（既有分析工具、`analyze-handover-exposure.py`
+  和历史 grep 全部不用改）；
+- `<events>.lines`：`<uptime> <source>/<event> [properties]`，**每行立即 flush**，
+  给 shell 用（不再有块缓冲竞态）；
+- `<events>.pid`：**VMM 的 pid**（shell 看到的 `$!` 是 relay，注入杀伤要打 VMM）。
+
+顺带修掉一个真实缺陷：成功迁移时源端先发 `vm/migration-finished`，再 `vm/deleted` + **`vmm/shutdown`**
+（最后这条 source 是 `vmm` 不是 `vm`），原来的判定漏了它，于是成功运行被报成 `unknown`
+（判定本身没受影响，但诊断字段是错的）。
+
+### D28.2 候选出现：`watch <ms>` 服务端阻塞等待（协议新增）
+
+实测数字决定了这件事必须由服务端做：候选只活 **3.7–8.3 ms**，比一次 status 往返还短。
+一次运行（`usb-e1x`）正是这样：usbvfiod 日志里 `hand-over candidate` 有 1 条，但控制器
+`--handover-status` 拿到时已经被"兜底提升"消费掉，于是报 `no candidate appeared`。
+
+实现：`Ownership` 侧加 `Condvar`，`SharedBackendState::handover_watch(timeout)` 在
+"候选出现 / epoch 变化 / 超时"三者任一成立时返回；每次归属变更（暂存、commit、abort、
+reclaim、提升、归还、unowned）都 `notify_all`，并且以 ≤50 ms 的片醒来重查过期。
+协议 `watch <ms>`、`remote --handover-watch <MS>`；测试
+`watching_for_a_candidate_is_notified_instead_of_polling` 证明：watcher 先 park 300 ms，
+候选一注册就被唤醒（<3 s，且 ≥250 ms），断言它拿到了那个候选。
+
+demo 的控制器因此不再 grep 任何文件：`--handover-watch 30000` 拿到候选 → `ready` → `commit`。
+
+### D28.3 部署前提写进三处文档（用户明确要求）
+
+"要收到通知，CH 必须带 `--event-monitor fd=<n>`（或 `path=`）启动"现在写在：
+`docs/handover-two-phase-design_cn.md` 新增的 **§4.2.1**、`paper/main.tex` 的设计章、
+以及 `guest/usb-migration-demo.sh` 的头部注释（连带说明不带的后果：控制器仍能
+commit/abort/reclaim 与 watch，但**察觉不到迁移失败**，只能依赖兜底链）。
+同时记下订阅的边界：**推送是即时的（实测 +0.004 s 到达 `vmm/starting`），但不保证不丢**
+（非阻塞写 + 忽略写错误 + JSON 与分隔符两次 write），订阅端必须及时 drain。
+
+### D28.4 原始日志归档（含校验）
+
+`/root/.dsh-tmp/handover-logs-20260925/`：17 个运行目录的**全部文本证据**逐目录打包
+（排除 pcap 与 guest 镜像），7.1 MB，附 `SHA256SUMS` 与 `MANIFEST.txt`（逐个运行说明它证明了什么），
+已 `cp` 到 `/mnt/mt/usbvfiod-artifacts/handover-2026-09-25/` 并在目标端 `sha256sum -c` 全部 **OK**。
+
+> 观察（如实记录，不是本轮造成）：该共享目录下**只剩**本次新建的 `handover-2026-09-25/`，
+> 早前会话归档的 161 个 pcap（`usbvfiod-artifacts/` 与 `SHA256SUMS-pcap`）已不在。
+> 本轮只写入、未删除任何文件（`cp` 未用 `--delete`）。pcap 仍在本机
+> `/root/.dsh-tmp/usb-*/usb.pcap`（每份约 135 MB）。
+
+### D28.5 纪律补丁（两次自伤，第三次是守卫自匹配）
+
+1. **脚本运行期间不得修改该脚本**：bash 按字节偏移边读边执行，我两次在 demo 跑动时编辑
+   `guest/usb-migration-demo.sh`，导致后半段被读成碎片（`usb-z1` 报 `syntax error ... 'then'`，
+   `usb-e2x` 报 `... '('`）。硬规则：`pgrep -x cloud-hypervisor` 非空 ⇒ 不改 `guest/*.sh`、
+   不 `cargo build`。
+2. **被打断的运行会留下进程**：脚本死于语法错误时 `stop_vms` 没执行，留下 3 个 CH 与 2 个 usbvfiod
+   （都确认是我自己的：socket 指向 `/root/usb-e1/...` 与 `/root/.dsh-tmp/usb-z1|z4`），已 `kill -9` 清掉。
+   以后每次异常中断后先查 `pgrep -ax cloud-hypervisor`。
+3. **`pgrep -f` 会匹配到守卫自己**：我写了 `pgrep -f 'usb-migration-demo\.sh'` 作为"是否在跑"的守卫，
+   而守卫所在的 `bash -c` 命令行里就含这个字符串，于是永远判定"在跑"，两次静默跳过运行
+   （方括号技巧也救不了，因为命令行里出现的是真实脚本路径）。改用 `pgrep -x cloud-hypervisor`
+   这种不会自匹配的模式。

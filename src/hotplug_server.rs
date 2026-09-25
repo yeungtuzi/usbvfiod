@@ -119,6 +119,8 @@ fn handle_handover(
     // answers asynchronously, so the server cannot ask it from inside the
     // preflight, while the control plane can and does so on every command.
     if let Some(state) = handover {
+        // A hand-over command is what makes a client a controller.
+        state.note_controller_seen();
         let attached = async_runtime.block_on(hotplug_control.list_devices()).len() as u64;
         // Test hook (debug builds only): pretend nothing is attached, so the A5
         // refusal can be exercised on a host with no spare USB device to unplug.

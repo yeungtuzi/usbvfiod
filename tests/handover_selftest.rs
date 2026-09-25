@@ -169,7 +169,11 @@ struct Peer {
 
 impl Peer {
     fn connect(server: &Server) -> Self {
-        let client = Client::new(&server.vfio_socket).expect("vfio-user handshake");
+        Self::connect_to(&server.vfio_socket)
+    }
+
+    fn connect_to(socket: &std::path::Path) -> Self {
+        let client = Client::new(socket).expect("vfio-user handshake");
         Self {
             id: None,
             client,
@@ -219,9 +223,14 @@ impl Peer {
     /// Register the interrupt line. A registration on a connection that is not
     /// the owner is what the server stages as a hand-over candidate.
     fn register(&mut self) {
+        self.try_register().expect("set_irqs");
+    }
+
+    /// Register, returning the error instead of panicking: in binding mode the
+    /// server may refuse the registration, and the caller has to see that.
+    fn try_register(&mut self) -> Result<(), vfio_user::Error> {
         self.client
             .set_irqs(MSIX_IRQ_INDEX, 0, 0, 1, &[self.efd.as_raw_fd()])
-            .expect("set_irqs");
     }
 
     /// Disable the interrupt line: a data-path command only the owner may issue.
@@ -1162,4 +1171,214 @@ fn watching_for_a_candidate_is_notified_instead_of_polling() {
         elapsed >= Duration::from_millis(250),
         "the watcher must have parked rather than answered immediately ({elapsed:?})"
     );
+}
+
+#[test]
+fn a_parked_registration_is_released_by_the_commit() {
+    // Binding mode. The destination's registration is held until the controller
+    // decides, and the VMM does not deactivate the source until that reply
+    // arrives - so the decision happens *in front of* the switchover. `commit`
+    // during the park is what releases it: the controller, not the VMM, closes
+    // the hand-over.
+    let server = Server::start(
+        "binding-commit",
+        &[
+            "--handover-require-device",
+            "false",
+            "--handover-block-registration",
+            "true",
+        ],
+    );
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+    let announced = status(&server);
+    assert!(
+        announced.binding,
+        "binding mode must be reported in the status"
+    );
+    assert!(announced.controller, "a control client has been seen");
+
+    // The destination registers on its own thread, because the call parks.
+    let socket = server.vfio_socket.clone();
+    let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+    // The registering thread parks inside `try_register`, so the decision has to
+    // come from this thread: it is the controller's job.
+    let registration = std::thread::spawn(move || {
+        let mut dst = Peer::connect_to(&socket);
+        dst.prepare();
+        staged_tx
+            .send(())
+            .expect("announce that registration is next");
+        let started = Instant::now();
+        let result = dst.try_register();
+        let kicks = dst.drain_kicks();
+        // Hand the connection back so it stays open: closing it would be the
+        // committed owner disconnecting, which correctly triggers the automatic
+        // fallback and kicks the source again.
+        (started.elapsed(), result.is_ok(), kicks, dst)
+    });
+    staged_rx
+        .recv()
+        .expect("the destination is about to register");
+    sleep(Duration::from_millis(100));
+    let parked = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = status(&server);
+            if snapshot.candidate.is_some() {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "no candidate was ever staged");
+            sleep(Duration::from_millis(20));
+        }
+    };
+    assert_eq!(
+        parked.owner,
+        Some(src.id()),
+        "the source must still own the device while the destination is parked"
+    );
+    assert_eq!(
+        src.drain_kicks(),
+        0,
+        "the source must keep its line, untouched, while the destination is parked"
+    );
+
+    let dst_id = parked.candidate.expect("candidate");
+    expect_ok(&server, &HandoverCommand::Ready { conn: dst_id });
+    let committed = expect_ok(
+        &server,
+        &HandoverCommand::Commit {
+            conn: dst_id,
+            epoch: boot_epoch,
+        },
+    );
+    assert_eq!(committed.owner, Some(dst_id));
+
+    let (elapsed, ok, kicks, dst) = registration.join().expect("registration thread");
+    assert!(ok, "the commit must release the parked registration");
+    assert!(
+        elapsed >= Duration::from_millis(50),
+        "the registration must have been held rather than answered immediately ({elapsed:?})"
+    );
+    assert!(
+        kicks > 0,
+        "the released destination must get a working line"
+    );
+    let src_after = src.drain_kicks();
+    assert_eq!(
+        src_after,
+        0,
+        "the source must get nothing after the commit; log says installed={} raised={} promoted={}",
+        server.log().matches("interrupt line installed").count(),
+        server.log().matches("re-raising one interrupt").count(),
+        server
+            .log()
+            .matches("promoted the staged candidate")
+            .count()
+    );
+    drop(dst);
+}
+
+#[test]
+fn a_parked_registration_without_a_decision_is_released_without_the_line() {
+    // Binding mode, nobody decides: the registration is held for the whole
+    // preflight window and then released *without* installing anything, so the
+    // device stays with the running guest.
+    //
+    // Note what the destination VMM sees: `Ok`, because a vfio-user client only
+    // reads the reply header and ignores its error flag (measured in the client
+    // source, `vfio_user::Client::set_irqs`). A refusal therefore cannot be
+    // delivered through the reply - it is delivered by the VMM supervisor
+    // terminating the destination, which is what makes the migration fail and the
+    // source resume. That is why this test asserts the timing and the ownership
+    // state rather than an error code.
+    let server = Server::start(
+        "binding-timeout",
+        &[
+            "--handover-require-device",
+            "false",
+            "--handover-block-registration",
+            "true",
+            "--handover-preflight-timeout-ms",
+            "300",
+        ],
+    );
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let mut dst = Peer::connect(&server);
+    dst.prepare();
+    let started = Instant::now();
+    let result = dst.try_register();
+    let elapsed = started.elapsed();
+    assert!(
+        result.is_ok(),
+        "a vfio-user client cannot see the refusal; the supervisor has to act"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the registration must have been held for the preflight window ({elapsed:?})"
+    );
+    let after = status(&server);
+    assert_eq!(after.owner, Some(src.id()), "the owner must not change");
+    assert_eq!(after.epoch, boot_epoch, "the epoch must not change");
+    assert_eq!(after.candidate, None, "the released candidate is dropped");
+    assert!(
+        server.log().contains("no hand-over decision within"),
+        "the refusal must be logged for the supervisor to act on"
+    );
+    src.assert_no_kick();
+}
+
+#[test]
+fn binding_degrades_without_a_controller() {
+    // Binding mode with no controller ever seen: a deployment that never speaks
+    // the control protocol keeps the old behaviour instead of stalling every
+    // migration. The status reports the degradation.
+    let server = Server::start(
+        "binding-degraded",
+        &[
+            "--handover-require-device",
+            "false",
+            "--handover-block-registration",
+            "true",
+        ],
+    );
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    // No control command yet: adopt() would query the status, so resolve the
+    // owner id afterwards instead.
+    let mut dst = Peer::connect(&server);
+    dst.prepare();
+    let started = Instant::now();
+    dst.try_register()
+        .expect("registration is not held without a controller");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "without a controller the registration must not be held ({elapsed:?})"
+    );
+    let snapshot = status(&server);
+    assert!(snapshot.binding, "binding mode is on");
+    assert!(
+        snapshot.controller,
+        "this status query is itself the first controller contact"
+    );
+    assert!(
+        snapshot.candidate.is_some(),
+        "staging is reported either way; only holding the reply needs a controller"
+    );
+    let _ = &dst;
 }

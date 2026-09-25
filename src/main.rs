@@ -90,14 +90,18 @@ fn main() -> Result<()> {
             Some(args.handover_require_ready),
             Some(args.handover_auto_reclaim),
             Some(args.handover_require_device),
+            Some(args.handover_block_registration),
+            Some(args.handover_require_controller),
         );
         info!(
-            "two-phase hand-over enabled: preflight timeout {} ms, reclaim lease {} ms, require-ready {}, auto-reclaim {}, require-device {}",
+            "two-phase hand-over enabled: preflight timeout {} ms, reclaim lease {} ms, require-ready {}, auto-reclaim {}, require-device {}, bind-registration {}, require-controller {}",
             args.handover_preflight_timeout_ms,
             args.handover_lease_ms,
             args.handover_require_ready,
             args.handover_auto_reclaim,
-            args.handover_require_device
+            args.handover_require_device,
+            args.handover_block_registration,
+            args.handover_require_controller
         );
         Runner::Multi(shared)
     } else {

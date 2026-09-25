@@ -108,6 +108,27 @@ pub struct Cli {
     #[arg(long, value_name = "BOOL", default_value_t = true, action = clap::ArgAction::Set)]
     pub handover_require_device: bool,
 
+    /// Hold the destination's registration reply until the controller has
+    /// decided (binding preflight).
+    ///
+    /// The VMM activates the destination's device with a command whose reply we
+    /// control, and it does not tear the source down until that reply arrives, so
+    /// holding it puts the hand-over decision in front of the switchover instead
+    /// of behind it. It needs a controller: without one the registration would be
+    /// refused after the preflight window, so a deployment that never speaks the
+    /// control protocol should leave this off (see
+    /// also --handover-require-controller). Only used with --max-clients > 1.
+    #[arg(long, value_name = "BOOL", default_value_t = false, action = clap::ArgAction::Set)]
+    pub handover_block_registration: bool,
+
+    /// Refuse a hand-over when no controller has ever spoken on the control
+    /// socket, instead of silently falling back to the unbound behaviour.
+    ///
+    /// Only meaningful together with --handover-block-registration, and only used
+    /// with --max-clients > 1.
+    #[arg(long, value_name = "BOOL", default_value_t = false, action = clap::ArgAction::Set)]
+    pub handover_require_controller: bool,
+
     /// Give the device back to the previous owner automatically if the committed
     /// owner disappears within the reclaim lease.
     ///

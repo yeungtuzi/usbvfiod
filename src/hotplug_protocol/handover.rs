@@ -324,6 +324,10 @@ pub struct HandoverSnapshot {
     pub ready: bool,
     /// Reclaim window after a commit, in milliseconds.
     pub lease_ms: u64,
+    /// Whether the destination's registration reply is held for a controller.
+    pub binding: bool,
+    /// Whether a control client has been seen (binding degrades without one).
+    pub controller: bool,
 }
 
 impl HandoverSnapshot {
@@ -347,6 +351,10 @@ impl HandoverSnapshot {
                 snapshot.lease_ms = v;
             } else if let Some(v) = field.strip_prefix("ready=") {
                 snapshot.ready = v == "true";
+            } else if let Some(v) = field.strip_prefix("binding=") {
+                snapshot.binding = v == "true";
+            } else if let Some(v) = field.strip_prefix("controller=") {
+                snapshot.controller = v == "true";
             }
         }
         snapshot
@@ -465,14 +473,17 @@ mod tests {
 
     #[test]
     fn snapshot_parses_a_rendered_status() {
-        let snapshot =
-            HandoverSnapshot::parse("owner=0 prev=- candidate=1 epoch=1 ready=true lease_ms=5000");
+        let snapshot = HandoverSnapshot::parse(
+            "owner=0 prev=- candidate=1 epoch=1 ready=true lease_ms=5000 binding=true controller=false",
+        );
         assert_eq!(snapshot.owner, Some(0));
         assert_eq!(snapshot.prev, None);
         assert_eq!(snapshot.candidate, Some(1));
         assert_eq!(snapshot.epoch, 1);
         assert!(snapshot.ready);
         assert_eq!(snapshot.lease_ms, 5000);
+        assert!(snapshot.binding);
+        assert!(!snapshot.controller);
         assert_eq!(snapshot.resolve("owner"), Some(0));
         assert_eq!(snapshot.resolve("prev"), None);
         assert_eq!(snapshot.resolve("candidate"), Some(1));

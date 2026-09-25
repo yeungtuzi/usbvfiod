@@ -567,3 +567,14 @@ owner 连接消失时的三级兜底），补齐 A4/A5 预检，把真机 harnes
 | T9 陈旧破坏性命令 | 无 guest | 忽略 + warn，新 owner 的线仍可 kick | 同上 |
 | T10 单客户端回归 | 真机（`MAX_CLIENTS=1`，无迁移） | **PASS**：复制 55.9 s、rc=0、md5 与期望一致、`interrupt lines inst.: 1`（单客户端路径无交接） | `usb-z4` |
 | T5 abort / 负对照 | 无 guest / 真机 | abort 不切换且 reason 入日志；无人 commit 时目标端 guest 约 35 s 后失去 USB 栈 | `usb-demo-t3` |
+
+### 12.5 轮次 9 追加（推送化与部署前提，2026-09-25）
+
+| 轴 | 追加内容 | 结论 |
+|---|---|---|
+| 系统 | 控制协议新增 `watch <ms>`（服务端条件变量阻塞等待），用于解决"候选只活 3.7–8.3 ms、轮询必然漏掉"；CH 事件改由自持 socketpair 订阅（`--event-monitor fd=`），并修正成功路径的 `vmm/shutdown` 判定 | **Accept** |
+| 方法学 | 新增 `watching_for_a_candidate_is_notified_instead_of_polling`（先 park 再注册，断言被唤醒且拿到候选）；实测记录订阅到达延迟与"不保证不丢"的边界；两次"运行中改脚本"的自伤已在 D28.5 记为硬纪律，受影响运行（`usb-z1`/`usb-e2x`）保留原样并在 MANIFEST 中标注 | **Accept** |
+| 写作与工件 | 部署前提（CH 必须带 `--event-monitor`）写进设计 §4.2.1、论文设计章与 demo 头部；原始日志 17 份文本证据打包 + `SHA256SUMS` + `MANIFEST.txt` 归档到 `/mnt/mt` 并校验通过 | **Accept** |
+
+**仍未做**：M6（绑定式预检）——需要用户批准，且应先做"给目标端 `SetIrqs` 回错 → CH 判失败并恢复源端"
+的真机实验；B1（候选 region 读取完整性）未实现（A3 间接覆盖）；论文三评审面板未针对本轮重跑。

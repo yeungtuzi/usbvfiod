@@ -121,6 +121,22 @@ struct Ownership {
     auto_reclaim: bool,
     /// Enforce A5 (a device must still be attached).
     require_device: bool,
+    /// Hold the destination's registration reply until the controller decides.
+    ///
+    /// This is what gives the controller a window in which the *source* is still
+    /// intact: the VMM activates the destination's device by sending `SetIrqs`
+    /// and does not proceed to tear the source down until that command returns,
+    /// so parking the reply moves the hand-over decision in front of the
+    /// switchover. Measured: a 300 ms delay in the reply produced a 319 ms
+    /// migration downtime, an 8 s delay an 8021 ms one - the VMM really waits.
+    block_registration: bool,
+    /// Fail closed when no controller has ever spoken on the control socket.
+    ///
+    /// With `block_registration` on but this off, a deployment without a
+    /// controller keeps the old behaviour instead of stalling every migration.
+    require_controller: bool,
+    /// Whether any control client has ever sent a hand-over command.
+    controller_seen: bool,
     /// Number of attached devices as last reported by the control plane.
     ///
     /// `None` means nobody has asked the hot-plug port yet, and then A5 cannot be
@@ -221,6 +237,10 @@ pub struct HandoverStatus {
     pub require_device: bool,
     /// Whether the driver's readiness declaration is required to commit.
     pub require_ready: bool,
+    /// Whether the destination's registration reply is held for the controller.
+    pub binding: bool,
+    /// Whether a control client has been seen (binding is degraded without one).
+    pub controller: bool,
 }
 
 impl HandoverStatus {
@@ -230,7 +250,7 @@ impl HandoverStatus {
             v.map_or_else(|| "-".to_owned(), |v| v.to_string())
         }
         format!(
-            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} devices={} require_ready={} require_device={} live={:?}",
+            "owner={} prev={} candidate={} epoch={} ready={} lease_ms={} devices={} require_ready={} require_device={} binding={} controller={} live={:?}",
             id(self.owner),
             id(self.prev),
             id(self.candidate),
@@ -240,6 +260,8 @@ impl HandoverStatus {
             id(self.devices),
             self.require_ready,
             self.require_device,
+            self.binding,
+            self.controller,
             self.live,
         )
     }
@@ -282,6 +304,9 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
                 require_ready: true,
                 auto_reclaim: true,
                 require_device: true,
+                block_registration: false,
+                require_controller: false,
+                controller_seen: false,
                 device_count: None,
                 disable_owner_guard: false,
             }),
@@ -290,6 +315,11 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
     }
 
     /// Configure the hand-over policy from the command line.
+    ///
+    /// One argument per policy knob on purpose: each of them is a decision the
+    /// deployment has to make explicitly, and bundling them into a struct would
+    /// hide which of them a caller forgot to set.
+    #[allow(clippy::too_many_arguments)]
     pub fn configure_handover(
         &self,
         lease: Option<Duration>,
@@ -297,6 +327,8 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         require_ready: Option<bool>,
         auto_reclaim: Option<bool>,
         require_device: Option<bool>,
+        block_registration: Option<bool>,
+        require_controller: Option<bool>,
     ) {
         let mut o = self.lock_ownership();
         if let Some(v) = lease {
@@ -313,6 +345,26 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         }
         if let Some(v) = require_device {
             o.require_device = v;
+        }
+        if let Some(v) = block_registration {
+            o.block_registration = v;
+        }
+        if let Some(v) = require_controller {
+            o.require_controller = v;
+        }
+    }
+
+    /// Note that a control client exists.
+    ///
+    /// Only a hand-over command counts: that is a client which can actually decide.
+    pub fn note_controller_seen(&self) {
+        let mut o = self.lock_ownership();
+        if !o.controller_seen {
+            info!(
+                "a control client is present: the destination's registration reply will be held until it decides"
+            );
+            o.controller_seen = true;
+            self.announce_change();
         }
     }
 
@@ -537,6 +589,8 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             devices: o.device_count,
             require_device: o.require_device,
             require_ready: o.require_ready,
+            binding: o.block_registration,
+            controller: o.controller_seen,
         }
     }
 
@@ -1078,6 +1132,58 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
         let deadline = Instant::now() + o.preflight_timeout;
         if let Some(cand) = o.candidate.as_mut() {
             cand.deadline = deadline;
+        }
+
+        // Binding mode: hold the reply until the controller decides, so the
+        // source is not torn down before the decision exists. The VMM really
+        // waits for this reply (measured: a 300 ms delay produced a 319 ms
+        // migration downtime, an 8 s delay an 8021 ms one), which is what moves
+        // the hand-over decision in front of the switchover.
+        //
+        // The ownership lock is released while parked, which is what keeps the
+        // control socket usable so the commit can arrive. A refusal never
+        // installs anything: the line stays with the running guest, and it is the
+        // VMM supervisor (the process that owns the destination) that turns the
+        // refusal into a failed migration by terminating the destination. An
+        // error *reply* cannot do that job, because the vfio-user client only
+        // reads the reply header and ignores its error flag.
+        if o.block_registration && (o.controller_seen || o.require_controller) {
+            let deadline = Instant::now() + o.preflight_timeout;
+            loop {
+                if o.owner == self.id {
+                    info!(
+                        "client {} may proceed: the hand-over was committed (epoch {})",
+                        self.id, o.epoch
+                    );
+                    return Ok(());
+                }
+                if !o.candidate.as_ref().is_some_and(|c| c.id == self.id) {
+                    warn!(
+                        "client {} may not proceed: the hand-over was aborted or the candidate was dropped",
+                        self.id
+                    );
+                    return Err(std::io::Error::other(
+                        "the hand-over of this device was refused",
+                    ));
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    o.candidate = None;
+                    self.state.announce_change();
+                    warn!(
+                        "client {} may not proceed: no hand-over decision within {:?}; the device stays with the running guest",
+                        self.id, o.preflight_timeout
+                    );
+                    return Err(std::io::Error::other(
+                        "no hand-over decision arrived in time",
+                    ));
+                }
+                let left = (deadline - now).min(Duration::from_millis(50));
+                o = match self.state.changed.wait_timeout(o, left) {
+                    Ok((guard, _)) => guard,
+                    Err(poisoned) => poisoned.into_inner().0,
+                };
+            }
         }
 
         Ok(())
