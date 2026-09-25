@@ -1064,7 +1064,7 @@ status 查询会被同一次注册串行化，等它拿到状态时候选已经�
 
 ### D27.2 交付物
 
-- 实现：8 个提交，`cf17db0..9bf0dc6`，已推送到 `origin/main`（用户自己的 fork）；**未触碰任何上游 PR**。
+- 实现：9 个提交，`cf17db0..9bf0dc6`，已推送到 `origin/main`（用户自己的 fork）；**未触碰任何上游 PR**。
 - 无 guest 证明：`tests/handover_selftest.rs`，9 个测试，连跑 3 次全绿。
 - harness：`guest/usb-migration-demo.sh`（新增控制器、`HANDOVER=`、`KILL_DST_*=`
   与事件驱动的迁移结果判定）。
