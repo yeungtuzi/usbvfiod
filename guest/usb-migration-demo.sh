@@ -148,11 +148,17 @@ status_field() { # status_field <key>
 # without an interrupt line, so the controller polls fast and acts immediately.
 handover_controller() {
   local i=0 cand
-  while [ "$i" -lt 2400 ]; do
-    cand="$(status_field candidate)"
-    if [ -n "$cand" ] && [ "$cand" != "-" ]; then break; fi
-    sleep 0.025; i=$((i + 1))
+  # Watch the server's own log for the staging record: it is written before the
+  # destination's registration reply is sent, so it is the earliest observable
+  # instant, and reading a file does not compete with the registration for the
+  # ownership lock the way a status query does. The candidate is short-lived in
+  # practice - Cloud Hypervisor deactivates the source about 7 ms after the
+  # destination registers - so the fast path matters.
+  while [ "$i" -lt 24000 ]; do
+    grep -q 'hand-over candidate: client' "$RUN/usbvfiod.log" 2>/dev/null && break
+    sleep 0.005; i=$((i + 1))
   done
+  cand="$(status_field candidate)"
   if [ -z "$cand" ] || [ "$cand" = "-" ]; then
     log "hand-over: no candidate appeared; the source keeps the device"
     printf 'none\n' > "$RUN/handover.mode"
@@ -205,6 +211,57 @@ handover_controller() {
     *)
       log "ERROR: unknown HANDOVER=$HANDOVER"; return 1 ;;
   esac
+}
+
+# Trigger for a failure *after* the destination has asked for the device: watch
+# the server log, which records the staging before it replies, instead of the
+# control socket, whose status query is serialised behind that very registration.
+kill_destination_on_registration() {
+  local i=0
+  while [ "$i" -lt 4000 ]; do
+    grep -q 'hand-over candidate: client' "$RUN/usbvfiod.log" 2>/dev/null && break
+    sleep 0.025; i=$((i + 1))
+  done
+  if ! grep -q 'hand-over candidate: client' "$RUN/usbvfiod.log" 2>/dev/null; then
+    log "INJECTED FAILURE: the destination never registered; not killing it"
+    printf 'destination-never-registered\n' > "$RUN/handover.mode"
+    return 1
+  fi
+  date +%s.%N > "$RUN/handover.candidate"
+  log "INJECTED FAILURE: the destination has registered as a candidate; killing it"
+  kill -9 "$DST_PID" 2>/dev/null
+  printf 'destination-died-after-registering\n' > "$RUN/handover.mode"
+  return 1
+}
+
+# The outcome of a migration is a *CH event*, not the return code of
+# send-migration: the API call can return success while the switchover then fails
+# (measured: the source logs `Migration failed` and `Resumed VM successfully` after
+# ch-remote already returned 0). Reading the event monitor is the reliable path,
+# which is exactly what the design's event-driven controller prescribes.
+#
+# Order matters: a failed migration also emits `shutdown` later, so a failure
+# marker must win over it.
+wait_migration_outcome() {
+  local i=0
+  while [ "$i" -lt 900 ]; do
+    if grep -q '"event": "migration-failed"' "$RUN/src.events" 2>/dev/null; then
+      printf 'failed\n'; return 0
+    fi
+    if grep -q '"event": "resumed"' "$RUN/src.events" 2>/dev/null; then
+      printf 'resumed\n'; return 0
+    fi
+    if grep -q '"event": "shutdown"' "$RUN/src.events" 2>/dev/null; then
+      # The source is gone; look once more for a failure marker before calling
+      # this a successful migration.
+      if grep -qE '"event": "(migration-failed|resumed)"' "$RUN/src.events" 2>/dev/null; then
+        printf 'failed\n'; return 0
+      fi
+      printf 'shutdown\n'; return 0
+    fi
+    sleep 0.1; i=$((i + 1))
+  done
+  printf 'unknown\n'
 }
 
 # If the migration did not take, the device has to go back to the source. When
@@ -304,17 +361,30 @@ MIGRATION_EPOCH=$(date +%s.%N)
   send-migration destination_url=unix:"$RUN/mig.sock",memory_mode=memfds,downtime_ms=300,timeout_strategy=cancel \
   > "$RUN/send.log" 2>&1 &
 SEND_PID=$!
-handover_controller
-wait "$SEND_PID"; SEND_RC=$?
-log "send-migration exit=$SEND_RC"
-if [ "$SEND_RC" != "0" ] || grep -q 'Migration failed' "$RUN/src.log" 2>/dev/null; then
-  handover_rollback "the migration did not complete"
+if [ "${KILL_DST_ON_REGISTRATION:-0}" = "1" ]; then
+  kill_destination_on_registration
 else
-  log "hand-over: the migration completed; the destination keeps the device"
+  handover_controller
 fi
+wait "$SEND_PID"; SEND_RC=$?
+MIGRATION_OUTCOME="$(wait_migration_outcome)"
+printf '%s\n' "$MIGRATION_OUTCOME" > "$RUN/migration.outcome"
+log "send-migration exit=$SEND_RC; migration outcome=$MIGRATION_OUTCOME"
+case "$MIGRATION_OUTCOME" in
+  failed|resumed)
+    handover_rollback "the migration failed ($MIGRATION_OUTCOME)" ;;
+  shutdown)
+    log "hand-over: the migration completed; the destination keeps the device" ;;
+  *)
+    if [ "$SEND_RC" != "0" ]; then
+      handover_rollback "send-migration failed with exit $SEND_RC"
+    else
+      log "hand-over: no terminal migration event was seen; leaving the ownership as it is"
+    fi ;;
+esac
 # Sample the ownership again once the dust has settled: after a failure the
 # source VMM may have reconnected, and the status is what says who owns what.
-if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ]; then
+if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ] || [ "${KILL_DST_ON_REGISTRATION:-0}" = "1" ]; then
   sleep 20
   date +%s.%N > "$RUN/handover.aftermath.time"
   "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.aftermath" 2>&1
@@ -354,6 +424,7 @@ echo
 GLOG="$RUN/guest-demo.log"
 
 echo "--- hand-over control (harness) ---"
+echo "migration outcome (event) : $(cat "$RUN/migration.outcome" 2>/dev/null || echo '<none>')"
 echo "mode                      : $(cat "$RUN/handover.mode" 2>/dev/null || echo '<none>')"
 echo "destination staged at     : $(cat "$RUN/handover.candidate" 2>/dev/null || echo '<never>')"
 echo "hand-over committed at    : $(cat "$RUN/handover.commit" 2>/dev/null || echo '<never>')"

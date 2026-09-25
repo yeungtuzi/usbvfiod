@@ -70,6 +70,12 @@ struct Registration {
     start: u32,
     count: u32,
     fds: Vec<File>,
+    /// DMA ranges this connection had published when it registered.
+    ///
+    /// Kept on the registration so the preflight can still be evaluated after the
+    /// owner's own bookkeeping has been dropped, which is what happens when the
+    /// owner disconnects and leaves a candidate behind.
+    ranges: Vec<(u64, u64)>,
 }
 
 impl Registration {
@@ -87,6 +93,7 @@ impl Registration {
             start: self.start,
             count: self.count,
             fds: self.clone_fds()?,
+            ranges: self.ranges.clone(),
         })
     }
 }
@@ -334,6 +341,9 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
     pub fn disconnect(&self, id: u64) {
         let mut o = self.lock_ownership();
         o.live.remove(&id);
+        // The owner's DMA ranges outlive its bookkeeping entry: a promoted
+        // candidate still has to cover the memory the device was using.
+        let owner_ranges = o.mapped.get(&id).cloned().unwrap_or_default();
         o.mapped.remove(&id);
         if o.owner != id {
             return;
@@ -372,9 +382,21 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             }
         }
 
-        // 2. A staged candidate is promoted.
+        // 2. A staged candidate is promoted, but only if it could actually serve
+        //    the device: promoting a candidate that has not published the guest
+        //    memory would hand the device to a VMM that cannot complete a single
+        //    transfer.
         if o.auto_reclaim {
             if let Some(cand) = o.candidate.take() {
+                if let Err(e) = preflight_hard(&cand, &owner_ranges) {
+                    warn!(
+                        "not promoting candidate {}: it failed the preflight ({e}); the device stays unowned",
+                        cand.id
+                    );
+                    o.candidate = None;
+                    // fall through to "unowned"
+                    return self.make_unowned(o, id);
+                }
                 match self.install_registration(&cand.reg) {
                     Ok(recorded) => {
                         o.owner = cand.id;
@@ -397,6 +419,11 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         }
 
         // 3. Nobody can serve the device.
+        self.make_unowned(o, id);
+    }
+
+    /// Leave the device with no owner, exactly as at boot.
+    fn make_unowned(&self, mut o: MutexGuard<'_, Ownership>, id: u64) {
         o.owner = NO_OWNER;
         o.owner_reg = None;
         o.prev = NO_OWNER;
@@ -405,7 +432,7 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         o.committed_at = None;
         o.epoch += 1;
         warn!(
-            "owner connection {id} closed and nothing could take the device over; it is unowned (epoch {}), the next registration claims it",
+            "the device is unowned (epoch {}): owner connection {id} is gone and no live connection could take it over; the next registration claims it",
             o.epoch
         );
     }
@@ -531,19 +558,13 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
             if o.require_ready && !cand.ready {
                 return Err(HandoverError::NotReady);
             }
-            if cand.reg.fds.iter().any(|f| f.metadata().is_err()) {
-                return Err(HandoverError::BadEventFd);
-            }
-            // The candidate must have mapped at least everything the owner
-            // mapped: otherwise the device would DMA into memory the destination
-            // has not published.
             let owner_ranges = o.mapped.get(&o.owner).cloned().unwrap_or_default();
-            let cand_ranges = o.mapped.get(&id).cloned().unwrap_or_default();
-            if !ranges_cover(&cand_ranges, &owner_ranges) {
+            if let Err(e) = preflight_hard(cand, &owner_ranges) {
                 info!(
-                    "hand-over commit refused: candidate {id} DMA ranges {cand_ranges:?} do not cover owner ranges {owner_ranges:?}"
+                    "hand-over commit refused: candidate {id} failed the preflight ({e}); candidate ranges {:?}, owner ranges {owner_ranges:?}",
+                    cand.reg.ranges
                 );
-                return Err(HandoverError::DmaIncomplete);
+                return Err(e);
             }
         }
 
@@ -634,6 +655,25 @@ impl Ownership {
         self.candidate = None;
         Some(id)
     }
+}
+
+/// The part of the preflight that every hand-over has to pass.
+///
+/// Whether a controller commits the candidate or the server has to promote it
+/// because the owner died, the candidate must be able to serve the device: its
+/// interrupt eventfd has to be usable, and it must have published at least the
+/// memory the device was already DMAing into. The driver's readiness declaration
+/// is deliberately *not* part of this: nobody is left to declare it when the
+/// owner is gone.
+fn preflight_hard(cand: &Candidate, owner_ranges: &[(u64, u64)]) -> Result<(), HandoverError> {
+    if cand.reg.fds.iter().any(|f| f.metadata().is_err()) {
+        return Err(HandoverError::BadEventFd);
+    }
+    let cand_ranges = &cand.reg.ranges;
+    if !ranges_cover(cand_ranges, owner_ranges) {
+        return Err(HandoverError::DmaIncomplete);
+    }
+    Ok(())
 }
 
 /// True if every range in `needed` is covered by `have`.
@@ -832,6 +872,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                     start,
                     count,
                     fds: cloned,
+                    ranges: o.mapped.get(&self.id).cloned().unwrap_or_default(),
                 });
                 if first {
                     o.epoch += 1;
@@ -858,6 +899,7 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                 start,
                 count,
                 fds,
+                ranges: o.mapped.get(&self.id).cloned().unwrap_or_default(),
             },
             deadline,
             ready,
@@ -883,6 +925,15 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
                  (USBVFIOD_INJECT_STAGING_DELAY_MS)"
             );
             std::thread::sleep(Duration::from_millis(ms));
+        }
+
+        // The preflight window starts when the destination VMM can act on the
+        // staging - that is, when this reply is sent - not while usbvfiod is
+        // still inside the registration. Otherwise the window would be partly
+        // spent before the peer ever learns that it is the candidate.
+        let deadline = Instant::now() + o.preflight_timeout;
+        if let Some(cand) = o.candidate.as_mut() {
+            cand.deadline = deadline;
         }
 
         Ok(())

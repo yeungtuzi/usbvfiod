@@ -158,6 +158,18 @@ control socket, and no VMM source change is required.
 
 复用现有的 `src/hotplug_protocol`（已有 `Attach`/`Detach`/`List` 与 `remote` 工具），新增：
 
+**实现说明（commit `3cfac7d`）**：三个旧命令是定长二进制消息，交接命令需要携带连接号、epoch
+和自由文本原因，因此**在同一 socket 上新增命令号 3 = 行式文本协议**：
+
+```text
+status | ready <conn> | commit <conn> <epoch> | abort <conn> [reason…] | reclaim <conn> <epoch>
+ok owner=0 prev=- candidate=1 epoch=1 ready=false lease_ms=5000 live=[…]
+err code=EPREFLIGHT_NOT_READY detail=…
+```
+
+理由是可诊断性：交接是策略决定，而读不回来的策略决定无法排障（`socat` 即可手工驱动）。
+`remote` 工具额外接受 `owner|prev|candidate|<id>` 角色关键字，harness 不必记住连接号。
+
 | 命令 | 语义 | 成功响应 |
 |---|---|---|
 | `HandoverStatus` | 列出所有连接、owner/epoch、候选状态与预检结果 | `{connections[], owner, epoch, candidate?, preflight{}}` |
@@ -235,21 +247,34 @@ control socket, and no VMM source change is required.
 - 这与论文已声明的信任模型一致：**vfio-user socket 与控制 socket 都必须视为可信**，
   不是防御恶意本地客户端的机制。
 
-#### 自动兜底：owner 丢失时归还给上一任（建议默认开启）
+#### 自动兜底：owner 连接消失时的三级处理（**已实现，见 D25.5**）
 
-最需要"无人值守也能恢复"的情形是**目标端崩溃**。此时不需要驱动方参与：
+死掉的连接不能继续持有设备——它无法服务中断，而状态行还会继续报告它是 owner（真机 T1 的
+aftermath 实测到 `owner=1 prev=0 live=[]`）。因此 `owner` 连接断开时按优先级处理：
 
-> 若已提交的 `owner` 连接断开，而 `prev` 仍然连接、且仍在租约内 →
-> 服务端自动 `owner = prev`、装线、kick 一次，并记录
-> `auto-reclaimed because the committed owner disconnected`。
+| 顺序 | 条件 | 动作 | 日志 |
+|---|---|---|---|
+| 1 | `prev` **仍在线** | `owner = prev`、装线、kick 一次 | `auto-reclaimed the device for client {prev} because the owner {id} disconnected` |
+| 2 | 有**暂存的候选** | 提升候选为 owner、装线、kick | `promoted the staged candidate {id} because the owner {id} disconnected` |
+| 3 | 都没有 | 设备变 **unowned**（等价于刚启动），**下一个注册立即成为 owner** | `nothing could take the device over; it is unowned` |
 
-这条规则在**成功迁移**中不会误触发：成功时断开的是源端（`prev`），不是 owner。
+三点说明：
+
+- 第 1 条**不再要求"仍在租约内"**。租约约束的是*控制器*的 reclaim 决策（防止迟到的 actor 把
+  已经成功的交接回滚）；而这条路径只在 owner **确已消失**时运行，此时拒绝归还只会把设备留给
+  一个不存在的连接，严格更差。`--handover-auto-reclaim` 仍然是这条兜底的总开关。
+- 第 2 条覆盖"源端死在成功迁移最后一刻"；第 3 条覆盖"迁移失败后源端 VMM 重连"——
+  重连会是一个**新连接、新 id**，既不是 `prev` 也无法 reclaim，只有"设备无人认领，
+  下一个注册立即接管"才能让它自动拿回设备。
+- 成功迁移中不会误触发：成功时断开的是源端（`prev`），不是 owner；
+  而 owner 断开时 `prev` 的连接也已经关闭（见 4.5.3）。
 
 #### 次要触发（为将来保留）
 
 接受来自 `prev` 的**一次新的非空 `SetIrqs`**（在租约内、`prev` 身份成立）作为 reclaim 请求。
 今天 CH 不会发（见上面的源码事实），但若将来 CH 在失败恢复路径中重新 `enable_irq`，
 或我们提供一个调用 `enable_irq` 的 helper，这条路径即自动生效，且与主触发不冲突（幂等）。
+**注意**：若该重连是一个**新连接**（新 id），它不会命中这条规则，而是命中上面第 3 条。
 
 #### 两种时序对照
 
@@ -261,6 +286,33 @@ A. 提交前失败（常见）                        B. 提交后取消（需�
    -> src 全程未受影响，**不需要 reclaim**         或 owner 连接断开 -> 自动兜底
                                                 -> src=owner(epoch=N+1)，装线 + kick
 ```
+
+### 4.5.3 实测：CH 在切换点就会拆掉源端设备（**真机 T1**）
+
+真机 T1（`/root/.dsh-tmp/usb-demo-t1`，见 D25.3）抓到的毫秒级时序：
+
+```
+01.940  目标端 connect → "hand-over candidate: client 1 staged (owner 0 keeps the line until commit)"
+01.948  源端 set IRQs #fds: 0            ← CH 主动 disable 源端中断线（设备 deactivate）
+01.949  Connection closed (client 0)     ← 源端 vfio-user 连接被关闭
+01.995  commit → set IRQs #fds: 1 → owner 1 (epoch 2) + kick
+```
+
+两个必须写进结论的事实：
+
+1. **源端不是"被抢"，而是自己先交还。** CH 在切换点 deactivate 源端设备（disable IRQ + 关闭
+   vfio-user 连接），发生在目标端注册前后约 8 ms，**早于迁移结果确定**。因此"暴露窗口"的
+   真实起点是这次 disable（而不是源端 `paused`），终点是 commit 时新线安装 + kick。
+   T1 实测：disable→安装 ≈ **48 ms**，paused→安装 ≈ **70 ms**。
+   窗口内目标端 guest 已经在发命令，事件 TRB 也已经写进共享 event ring（两端共享同一份
+   guest 内存），只是没人 kick；commit 的那一次 kick 让目标端 guest 重新查看 ring，
+   所以业务侧只表现为"掉速度"。
+2. **"提交后失败"必须重新审视**：此时源端连接已经不存在，"reclaim 给源端"无处可还。
+   也就是说，切换点之后的失败要在 CH 层面恢复源端设备，只能靠 CH 自己重新
+   `enable_irq`/重连；usbvfiod 能做的、也必须做的是：**死掉的 owner 不持有设备**（4.5.1 三级兜底），
+   从而让重连的源端**下一个注册立即接管**。真机失败复现因此必须在"目标端注册之后"触发
+   （`guest/usb-migration-demo.sh` 的 `KILL_DST_ON_REGISTRATION=1` +
+   `USBVFIOD_INJECT_STAGING_DELAY_MS`）。
 
 ### 4.5.2 迁移结果的检测：直接用 CH 自己的事件（不改 CH）
 
@@ -377,20 +429,23 @@ watcher: 订阅 src 与 dst 两个 CH 的事件通道
 
 | # | 场景 | 注入方式 | 期望 |
 |---|---|---|---|
-| T1 | 正常迁移 | 现有 harness + `ready`/`commit` | 与今天等价：20/20、md5 一致、零重枚举 |
-| T2 | 候选缺 DMA 映射 | 候选只读 region 不 `DmaMap` | 预检 A3 拒绝；**源端复制不中断**；迁移失败可重试 |
+| T1 | 正常迁移 | 现有 harness + `ready`/`commit` | **已实测 PASS**（D25.3）：md5 一致、spans migration、零重枚举、downtime 18 ms |
+| T2 | 候选缺 DMA 映射 | 候选只读 region 不 `DmaMap` | **已用无 guest 测试证明**（D25.2）：A3 拒绝、源端不动、候选可重试 |
 | T3 | 候选 eventfd 无效 | 传入坏 fd | A4 拒绝；源端无感 |
 | T4 | 设备已被拔出 | 候选期间 detach 设备 | A5 拒绝；源端收到明确错误而非静默卡死 |
-| T5 | 驱动方声明目标有问题 | 只 `HandoverAbort` | 不切换；源端继续完成复制 |
-| T6 | 预检超时 | 候选不发 `ready` 直到超时 | 服务端自动 abort；源端无感 |
-| T7 | 提交后取消（显式） | commit 后立刻 `HandoverReclaim{src, N}` | 源端恢复服务，复制继续 |
-| T7b | 提交后目标端崩溃（自动兜底） | commit 后 kill 目标 CH | owner 连接断开 → 自动归还 `prev`；源端恢复 |
+| T5 | 驱动方声明目标有问题 | 只 `HandoverAbort` | **已用无 guest 测试证明**（D25.2）：不切换、epoch 不变、reason 进日志 |
+| T6 | 预检超时 | 候选不发 `ready` 直到超时 | **已用无 guest 测试证明**（D25.2）：过期 → `EPREFLIGHT_TIMEOUT`；源端无感 |
+| T7 | 提交后取消（显式） | commit 后立刻 `HandoverReclaim{src, N}` | **已用无 guest 测试证明**（D25.2，断言源端 eventfd 被 kick） |
+| T7b | 提交后目标端崩溃（自动兜底） | commit 后 kill 目标 CH | **已用无 guest 测试证明**（D25.2）：自动归还 `prev` 并 kick |
+| T7e | owner 死亡且 `prev` 已消失 | 断开源端后再断开目标端 | 设备变 unowned；**下一个注册立即成为 owner 并被 kick**（D25.5） |
+| T7f | owner 死亡时有暂存候选 | 源端 owner 直接断连 | 暂存候选被提升为 owner 并被 kick（D25.5） |
 | T7c | 非上一任发 reclaim | 用第三个连接/错误 pid 发 reclaim | `ERECLAIM_NOT_PREVIOUS_OWNER` / `ERECLAIM_UNTRUSTED_PEER`，归属不变 |
-| T7d | 陈旧 epoch | 用 `N-1` 发 reclaim | `ERECLAIM_EPOCH_MISMATCH`，归属不变 |
+| T7d | 陈旧 epoch | 用 `N-1` 发 reclaim | **已用无 guest 测试证明**：`EEPOCH_MISMATCH`，归属不变；非 prev 得 `ERECLAIM_NOT_PREVIOUS_OWNER` |
 | T12 | 事件驱动检测（取消） | 迁移中途杀目标端 / 触发源端 `resumed` | 控制器据 `migration-receive-failed` 或 `resumed` 自动 reclaim；源端复制继续 |
 | T13 | 事件驱动检测（成功） | 正常迁移 | `migration-receive-finished` → 不回滚；与 T1 等价 |
 | T8 | 租约过期后 reclaim | 超过 `lease_ms` | 拒绝并给 `ERECLAIM_LEASE_EXPIRED`；设备归属不变 |
-| T9 | 陈旧 epoch 破坏性命令 | 带 `epoch-1` 发 `SetIrqs` 空 fd | 拒绝并诊断 |
+| T9 | 陈旧破坏性命令 | 非 owner 发 `SetIrqs` 空 fd / `DmaUnmap` | **已用无 guest 测试证明**：忽略 + warn；且新 owner 的线仍可被 kick |
+| T14 | 目标端"已注册但迁移失败"（真机） | 目标端注册后 kill 目标 CH（`USBVFIOD_INJECT_STAGING_DELAY_MS`） | 源端从未失去线；CH 恢复源端后复制继续 |
 | T10 | 单客户端回归 | `--max-clients 1` | 与基线逐字节一致 |
 | T11 | owner 卡死 | 提交后 owner 不续租约 | 归属回到上一任存活连接（若启用租约归还） |
 

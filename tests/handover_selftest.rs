@@ -761,7 +761,7 @@ fn a_dead_owner_lets_the_next_registration_take_over() {
         status(&server)
     );
     assert!(
-        server.log().contains("it is unowned"),
+        server.log().contains("the device is unowned"),
         "the device becoming unowned must be logged"
     );
 
@@ -817,5 +817,58 @@ fn a_staged_candidate_is_promoted_when_the_owner_dies() {
     assert!(
         server.log().contains("promoted the staged candidate"),
         "the promotion must be logged"
+    );
+}
+
+#[test]
+fn a_candidate_that_cannot_serve_is_not_promoted() {
+    // Promotion is an automatic commit, so it has to pass the automatic part of
+    // the preflight. A destination that never published the guest memory would
+    // not complete a single transfer, and handing it the device because the owner
+    // happened to die first would be worse than leaving the device unowned.
+    let server = Server::start("promote-refused", &[]);
+    let mut src = Peer::connect(&server);
+    src.prepare();
+    server.await_log("event ring segment table is at");
+    src.register();
+    adopt(&server, &mut src, |s| s.owner);
+    let boot_epoch = status(&server).epoch;
+    assert_eq!(src.wait_for_kick(), 1);
+
+    let mut bare = Peer::connect(&server);
+    bare.register(); // registered, but no dma_map
+    adopt(&server, &mut bare, |s| s.candidate);
+
+    src.disconnect();
+    drop(src);
+    assert!(
+        wait_until(Duration::from_secs(5), || status(&server).owner.is_none()).is_ok(),
+        "a candidate that cannot serve the device must not be promoted; status was {:?}",
+        status(&server)
+    );
+    assert!(
+        server.log().contains("it failed the preflight"),
+        "the refused promotion must say why"
+    );
+    assert!(
+        status(&server).candidate.is_none(),
+        "the unusable candidate must be dropped, not left staged for the same refusal"
+    );
+
+    // A connection that *can* serve the device gets it, because an unowned device
+    // is claimed by the next registration.
+    let mut good = Peer::connect(&server);
+    good.prepare();
+    good.register();
+    adopt(&server, &mut good, |s| s.owner);
+    assert_eq!(
+        good.wait_for_kick(),
+        1,
+        "the usable connection must get a working line"
+    );
+    assert_eq!(
+        status(&server).epoch,
+        boot_epoch + 2,
+        "each ownership change moves the epoch"
     );
 }

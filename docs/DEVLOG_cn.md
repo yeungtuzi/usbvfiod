@@ -864,3 +864,116 @@ s2 的 usbvfiod 日志（毫秒级）：
 源端仍是 owner；目标端死在交接窗口 → 预检/事件判定失败 → **abort，源端从未失去中断线** →
 复制继续。这条断言将由 T12 实测验证。
 
+
+## D25. M2/M3 落地 + 真机 T1 实测：新方案完全成功（含一次"目标端已注册后失败"的复现）
+
+### D25.1 服务端：两阶段状态机 + 控制通道（commit `3cfac7d`）
+
+- `src/shared_backend.rs`：`Ownership` 状态机（`owner/prev/epoch/candidate/owner_reg/prev_reg/
+  mapped/live/lease/preflight_timeout/require_ready/auto_reclaim`）；`set_irqs` 从"注册即归属"
+  改为：首个注册=owner（与启动路径一致），第二个注册=**Candidate（只暂存 fd，不动设备）**；
+  `handover_ready/commit/abort/reclaim/status`；`commit` 的**预检在候选仍暂存时完成**，
+  只有到"提交点"才 `take()` 候选，因此任何拒绝都可以重试、且不会留下半个交接。
+- `src/hotplug_protocol/handover.rs`：新的**行式文本协议**（`status / ready / commit / abort /
+  reclaim`，回答 `ok k=v …` 或 `err code=… detail=…`）。三个旧命令保持定长二进制不动；
+  接收端先读 1 字节判命令号，旧命令的 fd 仍随首字节送达。选文本而非扩二进制的原因是
+  **可诊断**：交接是策略决定，策略决定必须能被读回来。
+- `src/bin/remote.rs`：`--handover-status/ready/commit/abort/reclaim`，并且接受
+  `owner|prev|candidate|<id>` 角色关键字（自动先查一次 status），harness 不必自己记住连接号。
+- `src/hotplug_server.rs`：五条命令接到 `SharedBackendState`；单客户端模式下明确回答
+  `ENOHANDOVER`，而不是静默无效。
+- CLI：`--handover-preflight-timeout-ms`（2000）、`--handover-lease-ms`（5000）、
+  `--handover-require-ready`（true）、`--handover-auto-reclaim`（true）。
+- `error code` 是协议的一部分（`ENO_CANDIDATE / EPREFLIGHT_NOT_READY /
+  EPREFLIGHT_A3_DMA_INCOMPLETE / EPREFLIGHT_TIMEOUT / EEPOCH_MISMATCH /
+  ERECLAIM_NOT_PREVIOUS_OWNER / ERECLAIM_PREV_GONE / ERECLAIM_LEASE_EXPIRED / EBACKEND`），
+  harness 断言它们而不是断言人读文本。
+
+### D25.2 无 guest 的确定性证明（commit `5e479c8`，`tests/handover_selftest.rs`）
+
+中断线的安装会在 interrupter worker 里**补发一次中断**，所以"数每个 peer 的 eventfd 被写了几次"
+就能直接回答"线装在谁身上、设备是否真的到达了它"。7 个测试，全部断言真实 eventfd 写：
+
+| 测试 | 断言 |
+|---|---|
+| `staging_…` | 目标端注册后 **源端 0 kick**、目标端 0 kick；未 ready 的 commit 被拒且候选仍在；ready+commit 后目标端 1 kick、源端 0 |
+| `…missing_memory…` | 只握手未 `DmaMap` 的目标端 commit 被拒（`EPREFLIGHT_A3_DMA_INCOMPLETE`），源端不动；abort 是 no-op 且 reason 进日志 |
+| `…expires…` | 无人 commit → 过期 → 迟到的 commit 得到 `EPREFLIGHT_TIMEOUT`；源端可继续重注册 |
+| `…reclaimed_or_falls_back` | commit 后源端被 kick；陈旧 epoch / 非 prev 被拒；**陈旧 unmap+disable 被忽略且新 owner 的线仍可被 kick**；reclaim 后源端被 kick；owner 死在租约内 → 自动归还并 kick |
+| `…dead_owner…` | owner 与 prev 都消失 → 设备变 unowned → **下一个注册立即成为 owner 并被 kick**（不需要控制器） |
+| `…promoted…` | owner 死亡时暂存的候选被提升为 owner 并被 kick |
+| `the_ownership_guard_is_load_bearing` | 打开 `USBVFIOD_DISABLE_OWNER_GUARD=1` 后，陈旧的 disable 真的装上 dummy 线：守卫是承重的，不是装饰 |
+
+### D25.3 真机 T1：控制器驱动，迁移完全成功（`VERDICT: PASS`）
+
+`guest/usb-migration-demo.sh` 现在**由 harness 驱动交接**（源端与目标端都加 `--event-monitor`，
+usbvfiod 加 `--hotplug-socket-path`）：控制器轮询 `--handover-status` 直到出现 candidate，
+等源端 `paused`，然后 `ready`+`commit`；若 `send-migration` 失败则 `reclaim prev`。
+运行：`RUN=/root/.dsh-tmp/usb-demo-t1 HANDOVER=commit ./guest/usb-migration-demo.sh`。
+
+```
+status after staging : owner=0 prev=- candidate=1 epoch=1 ready=false   ← 目标端只被暂存
+status after commit  : owner=1 prev=0 candidate=- epoch=2               ← 提交才换归属
+destination staged at: 802.967 s   committed at: 802.991 s              ← 控制器 24 ms 内完成 ready+commit
+source paused        : 802.926 s（CH 时钟）→ 提交安装 802.996 s          ← 暴露窗口 ~70 ms
+Migration completed after 0.0s with a downtime of 18ms
+md5 verdict: MATCH     spans migration: YES     enumerations after: 0     reset/err: 0
+VERDICT: PASS
+```
+
+### D25.4 真机实测到的、设计时没有预料到的一件事：CH 在切换点就会拆掉源端设备
+
+T1 的 usbvfiod 日志（毫秒）：
+
+```
+01.940  目标端 connect → "hand-over candidate: client 1 staged (owner 0 keeps the line until commit)"
+01.948  源端 set IRQs #fds: 0            ← CH 主动 disable 源端中断线（设备 deactivate）
+01.949  Connection closed (client 0)     ← 源端 vfio-user 连接被关闭
+01.949  owner connection 0 closed (no automatic reclaim)
+01.995  commit → set IRQs #fds: 1 → owner 1 (epoch 2) + kick
+```
+
+两点结论：
+
+1. **源端不是"被抢"，而是自己先交还**：CH 在切换点会 deactivate 源端设备（disable IRQ + 关连接），
+   这发生在目标端注册前后 ~8 ms，**早于迁移结果确定**。所以"暴露窗口"的真实起点是这一次
+   disable，而不是源端 paused；终点是 commit 安装线。T1 实测约 **48 ms（disable→commit）/ 70 ms
+   （paused→commit）**，窗口内目标端 guest 已经在发命令，但事件 TRB 已经写进共享 event ring，
+   只是没人 kick；commit 的那一次 kick 让目标端 guest 重新查看 ring → 全程只掉速度。
+2. 由此推出一个**失败路径的真实风险**：如果迁移在"源端已拆、目标端还没装线"之后失败，
+   源端的连接已经不存在了，"reclaim 给源端"根本无处可还。因此 `disconnect` 必须把死掉的
+   owner 处理干净（见 D25.5），并且真机失败复现实验必须**在目标端注册之后**触发失败。
+
+### D25.5 死掉的 owner 不能继续持有设备（commit `0feef91`）
+
+T1 的 aftermath（`KILL_DST_AFTER_COMMIT=1` 那次跑）暴露：owner 连接消失后
+`owner=1 prev=0 epoch=2 live=[]`——**设备永远属于一个已经不存在的连接**，状态行还在骗人。
+`disconnect` 改成三级优先：
+
+1. **prev 仍在线 → 归还 prev**。这里**不再要求"仍在租约内"**：租约是约束*控制器* reclaim 决策的
+   （防止一个迟到的 actor 把已经成功的交接回滚），而这条路径只在 owner 确已消失时运行；
+   拒绝归还只会把设备留给一个不存在的连接。
+2. **有暂存候选 → 提升候选**（源端死在成功迁移的最后一刻就是这种情况）。
+3. **否则设备变 unowned**（等价于刚启动），**下一个注册立即成为 owner**——迁移失败后重连的
+   源端 VMM 因此不需要任何控制器介入就能拿回设备。
+
+三级路径都有测试（D25.2 最后两行）与真机 aftermath 证据。
+
+### D25.6 预检窗口从"回复发出"开始算
+
+`set_irqs` 暂存候选时原先在**暂存瞬间**就设 deadline；但目标端 VMM 只有在收到回复后才能行动，
+所以窗口的一部分是在对端还不知道自己是候选时被消耗掉的（真机注入 3 s/8 s 延迟时，控制器的
+status 查询会被同一次注册串行化，等它拿到状态时候选已经过期）。现在 deadline 在
+**回复发出前**重设：窗口 = 目标端能行动的时长。
+
+> 附带发现的注入钩子语义：`USBVFIOD_INJECT_STAGING_DELAY_MS` 的 sleep 发生在持有
+> `ownership` 锁的临界区内（因为暂存与提交必须原子），所以期间控制面（`--handover-status`）
+> 会被一起阻塞。这是 debug 注入钩子的性质，生产路径不 sleep；已在此记录，避免误判为控制面缺陷。
+
+### D25.7 负数对照：没人 commit 会怎样
+
+`HANDOVER=none` + 8 s 注入延迟那一次（`/root/.dsh-tmp/usb-demo-t3`）：迁移"成功"、目标端接手，
+但**没人给它装线**（`interrupt lines installed: 2` = 源端启动那一次 + 源端拆自己的 dummy 线）。
+目标端 guest 继续跑了 35 s 后 xHCI 报 `host not responding to stop endpoint`、
+`USB disconnect`、`blk_update_request: I/O error`，复制 `rc=1`、md5 不符。
+也就是说：**commit 是承重的**——两阶段交接不是"多此一举的仪式"，少了它目标端 guest 最终会坏。
