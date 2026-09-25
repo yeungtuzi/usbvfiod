@@ -734,3 +734,24 @@ magnitude"、第三个暴露锚点的命名（实为 harness epoch 而非迁移�
 **本会话对 `origin`（`github.com/yeungtuzi/usbvfiod`，用户自己的 fork）的推送**：
 只推送 `main` 分支，**不会**更新上述两个 PR（它们的 head 分别是 `pr/multi-client`
 与 `fix/resettable-flag-parsing`）。若用户要求，后续连这类推送也先逐次批准。
+
+### D22.1 执行记录：关闭两个 draft PR（经用户逐条批准）
+
+用户批准内容：**静默关闭（不发 comment）+ 删除 head 分支**；并允许推送自己的 fork `main`。
+
+| 操作 | 对象 | 结果 |
+|---|---|---|
+| `gh pr close 316 --delete-branch` | `cyberus-technology/usbvfiod#316` | ✅ state=**CLOSED** |
+| `gh pr close 171 --delete-branch` | `rust-vmm/vfio#171` | ✅ state=**CLOSED** |
+| `git push origin --delete pr/multi-client` | `yeungtuzi/usbvfiod` | ✅ 已删除（该 fork 现仅剩 `main`） |
+| `git push origin --delete fix/resettable-flag-parsing` | `yeungtuzi/vfio` | ✅ 已删除 |
+
+说明：`gh` 对 fork 来的 PR 会跳过远程分支删除（提示 "Skipped deleting the remote branch of
+a pull request from fork"），因此分支是用 `git push --delete` 显式删除的；**未**创建任何
+issue/comment/review，**未**触碰上游仓库的任何代码或分支。
+
+**保留未动**：`yeungtuzi/vfio` 的 `demo/standalone-crate`（CH 的 `[patch.crates-io]` 指向它，
+论文复现需要）以及 `muislam/*`、`main`（非本次授权范围）。如需一并删除，请再单独指示。
+
+**此后流程**：任何对第三方仓库的写操作（PR/issue/comment/review/标签/分支，
+以及会更新上游 PR 的 fork 推送）都会先以"命令 + 逐字文案"形式提交给你批准。
