@@ -214,6 +214,21 @@ handover_controller() {
       return 0
       ;;
     commit)
+      # A5 on real hardware: pull the device out while the destination is only
+      # staged. The hand-over must be refused with the A5 code and the source must
+      # not be left silently hanging - it will report the device loss, which is
+      # the honest outcome of yanking the stick out.
+      if [ "${DETACH_DURING_STAGE:-0}" = "1" ]; then
+        local bus dev
+        bus=$(printf '%d' "$(printf '%s' "$DEVICE" | awk -F/ '{print $(NF-1)}')")
+        dev=$(printf '%d' "$(printf '%s' "$DEVICE" | awk -F/ '{print $NF}')")
+        log "INJECTED FAULT: detaching $bus:$dev while the destination is staged"
+        "$REMOTE" --socket "$RUN/hotplug.sock" --detach "$bus" "$dev" \
+          > "$RUN/detach.log" 2>&1 || log "detach returned non-zero (see detach.log)"
+        "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status \
+          > "$RUN/handover.after-detach" 2>&1
+        log "after the detach: $(cat "$RUN/handover.after-detach" 2>/dev/null)"
+      fi
       "$REMOTE" --socket "$RUN/hotplug.sock" --handover-ready candidate \
         >> "$RUN/handover.log" 2>&1
       date +%s.%N > "$RUN/handover.commit"
@@ -222,6 +237,15 @@ handover_controller() {
       printf 'commit\n' > "$RUN/handover.mode"
       "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.committed" 2>&1
       log "hand-over: committed; owner is now $(status_field owner), previous owner $(status_field prev)"
+      if [ "${DETACH_DURING_STAGE:-0}" = "1" ]; then
+        # With the device gone there is nothing to hand over, so the commit above
+        # was refused (the refusal is in handover.log). Terminate the destination
+        # so the run ends with the source resumed and its own error reported.
+        log "VETO: the device is gone; terminating the destination VMM"
+        kill -9 "$DST_CH_PID" 2>/dev/null
+        printf 'device-detached\n' > "$RUN/handover.mode"
+        return 1
+      fi
       if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ]; then
         log "hand-over: INJECTED FAILURE: killing the destination VMM after the commit"
         kill -9 "$DST_CH_PID" 2>/dev/null
