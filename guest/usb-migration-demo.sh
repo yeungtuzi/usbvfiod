@@ -38,6 +38,9 @@ CHR="${CHR:-$(dirname "$CH")/ch-remote}"
 USBVF="${USBVF:-$REPO/target/debug/usbvfiod}"
 DEVICE="${DEVICE:-/dev/bus/usb/001/007}"
 REMOTE="${REMOTE:-$REPO/target/debug/remote}"
+# Client slots: 1 is the historical single-client mode, which is the regression
+# arm (no hand-over is possible there, and the server still exits with the client).
+MAX_CLIENTS="${MAX_CLIENTS:-4}"
 # How the harness drives the hand-over: commit (default) or none.
 HANDOVER="${HANDOVER:-commit}"
 RUN="${RUN:-/run/usb-demo}"
@@ -285,7 +288,7 @@ handover_rollback() {
 }
 
 # --- 1. usbvfiod claims the physical stick -----------------------------------
-"$USBVF" --socket-path "$RUN/usbvfiod.sock" --max-clients 4 \
+"$USBVF" --socket-path "$RUN/usbvfiod.sock" --max-clients "$MAX_CLIENTS" \
   --hotplug-socket-path "$RUN/hotplug.sock" \
   --device "$DEVICE" --pcap-path "$RUN/usb.pcap" -v > "$RUN/usbvfiod.log" 2>&1 &
 USB_PID=$!; pids+=($USB_PID)
