@@ -55,6 +55,11 @@ REMOTE="${REMOTE:-$REPO/target/debug/remote}"
 # Client slots: 1 is the historical single-client mode, which is the regression
 # arm (no hand-over is possible there, and the server still exits with the client).
 MAX_CLIENTS="${MAX_CLIENTS:-4}"
+# BINDING=1 turns on the binding preflight: the destination's device activation
+# is held until the controller decides, which is what puts the decision in front
+# of the switchover. Without it (the default) the VMM never waits for us and the
+# automatic fallback closes the hand-over.
+BINDING="${BINDING:-0}"
 # How the harness drives the hand-over: commit (default) or none.
 HANDOVER="${HANDOVER:-commit}"
 RUN="${RUN:-/run/usb-demo}"
@@ -301,8 +306,10 @@ handover_rollback() {
 }
 
 # --- 1. usbvfiod claims the physical stick -----------------------------------
+BINDING_ARGS=()
+if [ "$BINDING" = "1" ]; then BINDING_ARGS=(--handover-block-registration true); fi
 "$USBVF" --socket-path "$RUN/usbvfiod.sock" --max-clients "$MAX_CLIENTS" \
-  --hotplug-socket-path "$RUN/hotplug.sock" \
+  --hotplug-socket-path "$RUN/hotplug.sock" "${BINDING_ARGS[@]}" \
   --device "$DEVICE" --pcap-path "$RUN/usb.pcap" -v > "$RUN/usbvfiod.log" 2>&1 &
 USB_PID=$!; pids+=($USB_PID)
 for _ in $(seq 1 40); do
@@ -445,6 +452,7 @@ GLOG="$RUN/guest-demo.log"
 
 echo "--- hand-over control (harness) ---"
 echo "migration outcome (event) : $(cat "$RUN/migration.outcome" 2>/dev/null || echo '<none>')"
+echo "binding preflight         : ${BINDING}"
 echo "mode                      : $(cat "$RUN/handover.mode" 2>/dev/null || echo '<none>')"
 echo "destination staged at     : $(cat "$RUN/handover.candidate" 2>/dev/null || echo '<never>')"
 echo "hand-over committed at    : $(cat "$RUN/handover.commit" 2>/dev/null || echo '<never>')"
