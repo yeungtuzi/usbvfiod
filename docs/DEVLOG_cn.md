@@ -817,3 +817,50 @@ issue/comment/review，**未**触碰上游仓库的任何代码或分支。
 在 `migration-receive-started` 且预检全绿时 `ready`+`commit`；在 `migration-receive-failed`
 或源端 `resumed` 时按"是否已 commit"选择 abort 或 reclaim。这样"失败/取消"的判定权交给 CH 本身，
 harness 不再需要推断取消语义。测试矩阵新增 T12（取消）与 T13（成功不误回滚）。
+
+## D24. E1 实测：迁移失败/取消时 CH 到底发什么事件（以及当前实现如何丢源端）
+
+**结论：CH 完整、及时地把失败告诉了我们，且不需要改 CH。** 用 `--event-monitor path=…`
+（JSON，见 `event_monitor/src/lib.rs::event_log`）与普通日志两条通道都能拿到。
+
+### 实测事件序列（`guest/exp-cancel-events.sh`，原始日志 `/root/usb-e1/{s1,s2}`）
+
+**成功路径（s1，8 s 交接延迟 + `timeout_s=2`，CH 仍判成功）**
+
+- 源端：`migration-starting → migration-started → pausing → paused → snapshotting → snapshotted → migration-finished → shutdown`
+- 目标端：`migration-receive-ready → migration-receive-starting → migration-receive-started → … → migration-receive-finished`
+- 源端日志：`Migration completed after 8.0s with a downtime of 8018ms`
+
+**失败路径（s2，源端 `paused` 后杀掉目标端）**
+
+- 源端：`migration-starting → migration-started → pausing → **paused** → snapshotting → snapshotted → **migration-failed** → resuming → **resumed** → shutdown`
+- 源端日志：`Migration failed: Socket error: failed to fill whole buffer` + **`Resumed VM successfully after failed migration`**
+- 目标端：`migration-receive-ready → migration-receive-starting → migration-receive-started → activated`（随后被杀）
+
+> 我原先的事件表漏了两个**源端**事件：`migration-starting` 与 `migration-failed`；
+> `migration-failed` 比"用 `resumed` 反推失败"更直接，应作为主判据。
+> 另外 `resuming/resumed` 在两端都会发（源端失败恢复、目标端接管后恢复），因此判据必须**按实例**区分。
+
+### 当前实现在这一情形下确实丢源端（确定性复现）
+
+s2 的 usbvfiod 日志（毫秒级）：
+
+```
+06:51:33.950  源端 set IRQs                          (启动注册)
+06:51:41.951  interrupt line installed + kick        (源端线, 8s 注入延迟后)
+06:51:50.877  目标端 set IRQs                        (目标端注册)
+06:51:58.877  interrupt line installed + kick        (目标端线 → 归属被抢走)
+```
+
+同一次运行的 guest 心跳：`copied` 从 2 MiB 涨到 6 MiB 后，**连续 17 次心跳（uptime 26.58 → 42.83，
+约 16 秒）停在 6291456 不动**。也就是说：CH 已经把源端 vCPU 恢复（`Resumed VM successfully`），
+但 usbvfiod 的中断线还指向**已经死掉的目标端**，源端 guest 再也收不到完成中断 → 复制永久停住。
+
+这正是领导说的"先断开旧的再连新的""不成功时旧环境起不来"，而且**不是理论**：
+只要目标端在源端暂停后注册过一次，随后无论因为什么失败，源端都会被留在死线上。
+（自然时序下这个窗口只有 0.4 ms 左右，所以表现为偶发；注入 8 s 延迟后 100% 复现。）
+
+**新设计在此情形下的行为**：目标端注册只会让它成为 **Candidate**（线暂存不装），
+源端仍是 owner；目标端死在交接窗口 → 预检/事件判定失败 → **abort，源端从未失去中断线** →
+复制继续。这条断言将由 T12 实测验证。
+
