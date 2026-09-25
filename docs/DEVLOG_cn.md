@@ -779,3 +779,22 @@ issue/comment/review，**未**触碰上游仓库的任何代码或分支。
    判定仍全部取自 guest 自身日志。
 
 **下一步**：等用户确认设计稿（M1）后再进入 M2 实现。任何对第三方仓库的写操作仍按 D22 逐条批准。
+
+### D23.1 reclaim 由谁触发（补充设计，含 CH 源码核对）
+
+问题：**上一任如何触发显式 reclaim？** 核对 CH 源码后确认**源端 VMM 自己发不出来**：
+`enable_irq`（发 `SetIrqs` 给 usbvfiod）只在设备激活时调用（`pci/src/vfio_user.rs:330`）；
+迁移失败走 `try_resume_vm_after_failed_migration`（`vmm/src/lib.rs:2143`），
+它**只恢复 vCPU、停 dirty log，不会重新 enable IRQ**。所以：
+
+1. **主触发**：驱动控制通道的 harness/supervisor 在确认迁移失败后发
+   `HandoverReclaim { conn: src_id, epoch: N }`；服务端校验
+   "conn == prev 且连接存活、epoch == 当前、在租约内、对端可信" 才切换。
+2. **身份**：连接 id 由 usbvfiod 分配并在 `HandoverStatus` 里连同角色与**对端 pid（SO_PEERCRED）** 返回，
+   驱动方据此把源/目标映射到 id；控制 socket 权限即信任边界（与论文既有信任声明一致）。
+3. **自动兜底**（建议默认开）：已提交的 owner 连接断开、而 prev 仍存活且在租约内 →
+   服务端自动归还给 prev（覆盖"目标端崩溃"且无人值守的情形；成功迁移时断开的是 prev，不会误触发）。
+4. **次要触发（为将来保留）**：接受 prev 在租约内的一次新的非空 `SetIrqs` 作为 reclaim 请求；
+   今天 CH 不会发，但若将来 CH 恢复路径重新 enable IRQ 或我们加一个 helper，即自动生效。
+
+设计文档已补 §4.5.1 与 T7b/T7c/T7d 三个测试项。

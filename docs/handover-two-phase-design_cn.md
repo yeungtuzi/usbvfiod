@@ -184,12 +184,83 @@ control socket, and no VMM source change is required.
 
 - **提交前失败**（预检不过/超时/`HandoverAbort`）：丢弃候选的 staged line，
   `owner` 与 epoch 不变，**源端完全无感**；候选的 DMA 映射随其连接关闭回收。
-- **提交后取消**：上一任 `prev` 若**连接仍存活**且携带 `epoch-1`，
-  可发 `HandoverReclaim`：`owner = prev`、`epoch += 1`、重新安装 `prev` 的线并 kick 一次。
-- **防滥用**：`reclaim` 只接受"上一任"身份；成功迁移之后源端已断开（其连接不存在），
-  因此无法 reclaim；若源端连接仍在但迁移其实已成功，由驱动方（控制通道）决定是否受理。
+  这是绝大多数迁移失败的情形，**不需要 reclaim**。
+- **提交后取消**：才需要 reclaim，见 4.5.1。
 - **租约**：`prev` 的 reclaim 窗口 = `lease_ms`（默认 5000 ms，可配）。
   超时后拒绝并返回 `ERECLAIM_LEASE_EXPIRED`，同时在日志中给出"设备当前归属"。
+
+### 4.5.1 reclaim 由谁触发、如何证明身份
+
+**结论：由驱动控制通道的一方（harness / supervisor）显式发出；源端 VMM 不会也无法发出。**
+
+已核对 CH 源码得出的两个事实：
+
+1. 往 usbvfiod 发 `SetIrqs` 的位置是 `pci/src/vfio_user.rs:330` 的 `enable_irq`，
+   **只在设备激活时调用**；
+2. 迁移失败时 CH 调用 `vmm/src/lib.rs:2143` 的 `try_resume_vm_after_failed_migration`，
+   它**只 `vm.resume()` 恢复 vCPU、停 dirty log**，**不会重新 `enable_irq`**。
+
+因此源端在"提交后被取消"时不会重新注册中断线，"靠源端重新注册来自动回滚"这条路**今天不存在**
+（可作为将来 CH 版本或 helper 的补充信号，见下文的次要触发）。
+
+#### 主触发：控制通道 `HandoverReclaim`
+
+驱动方的调用序列：
+
+```text
+1. HandoverStatus                      -> { owner: dst_id, prev: src_id, epoch: N, connections[] }
+2. （迁移失败/取消：send-migration 返回错误，或目标 VM 已死）
+3. HandoverReclaim { conn: src_id, epoch: N }
+   -> { ok: true, epoch: N+1 }          # 服务端完成：owner=src、装线、kick 一次
+```
+
+服务端在接受 `reclaim` 前逐项校验（全部满足才切换）：
+
+| 校验 | 否定的结果 |
+|---|---|
+| `conn` == 记录中的 `prev` | `ERECLAIM_NOT_PREVIOUS_OWNER` |
+| `prev` 的连接**仍然打开**（socket 存活） | `ERECLAIM_PREV_GONE`（源端已退出，无处可回） |
+| `epoch` == 当前 epoch（即 commit 时下发的那一个） | `ERECLAIM_EPOCH_MISMATCH`（拒绝陈旧回滚） |
+| `now - committed_at <= lease_ms` | `ERECLAIM_LEASE_EXPIRED` |
+| 控制通道对端身份可信（见下） | `ERECLAIM_UNTRUSTED_PEER` |
+
+#### 身份与信任边界
+
+- usbvfiod 为每个被接受的连接分配 `id`（现有 `next_id`），并在 `HandoverStatus` 中同时返回
+  `id`、角色（owner/prev/candidate）、**对端 pid**（`SO_PEERCRED`）与连接年龄，
+  驱动方据此把"源端/目标端"映射到具体 `id`；
+- 控制命令只从本地 unix socket 接受，权限由文件系统控制；
+  可选要求 `conn` 与命令发起者的 `SO_PEERCRED` 存在允许关系（例如同一 pid 或同一 cgroup），
+  避免本机其它进程劫持归属；
+- 这与论文已声明的信任模型一致：**vfio-user socket 与控制 socket 都必须视为可信**，
+  不是防御恶意本地客户端的机制。
+
+#### 自动兜底：owner 丢失时归还给上一任（建议默认开启）
+
+最需要"无人值守也能恢复"的情形是**目标端崩溃**。此时不需要驱动方参与：
+
+> 若已提交的 `owner` 连接断开，而 `prev` 仍然连接、且仍在租约内 →
+> 服务端自动 `owner = prev`、装线、kick 一次，并记录
+> `auto-reclaimed because the committed owner disconnected`。
+
+这条规则在**成功迁移**中不会误触发：成功时断开的是源端（`prev`），不是 owner。
+
+#### 次要触发（为将来保留）
+
+接受来自 `prev` 的**一次新的非空 `SetIrqs`**（在租约内、`prev` 身份成立）作为 reclaim 请求。
+今天 CH 不会发（见上面的源码事实），但若将来 CH 在失败恢复路径中重新 `enable_irq`，
+或我们提供一个调用 `enable_irq` 的 helper，这条路径即自动生效，且与主触发不冲突（幂等）。
+
+#### 两种时序对照
+
+```text
+A. 提交前失败（常见）                        B. 提交后取消（需要 reclaim）
+   src=owner, dst=Candidate                     src=prev, dst=owner(epoch=N)
+   dst 预检失败/超时/Abort                      迁移取消 / dst 崩溃
+   -> 丢弃 staged line                          -> HandoverReclaim{src,N}  (驱动方)
+   -> src 全程未受影响，**不需要 reclaim**         或 owner 连接断开 -> 自动兜底
+                                                -> src=owner(epoch=N+1)，装线 + kick
+```
 
 ### 4.6 超时与租约
 
@@ -247,7 +318,10 @@ control socket, and no VMM source change is required.
 | T4 | 设备已被拔出 | 候选期间 detach 设备 | A5 拒绝；源端收到明确错误而非静默卡死 |
 | T5 | 驱动方声明目标有问题 | 只 `HandoverAbort` | 不切换；源端继续完成复制 |
 | T6 | 预检超时 | 候选不发 `ready` 直到超时 | 服务端自动 abort；源端无感 |
-| T7 | 提交后取消 | commit 后立刻 `HandoverReclaim` | 源端恢复服务，复制继续 |
+| T7 | 提交后取消（显式） | commit 后立刻 `HandoverReclaim{src, N}` | 源端恢复服务，复制继续 |
+| T7b | 提交后目标端崩溃（自动兜底） | commit 后 kill 目标 CH | owner 连接断开 → 自动归还 `prev`；源端恢复 |
+| T7c | 非上一任发 reclaim | 用第三个连接/错误 pid 发 reclaim | `ERECLAIM_NOT_PREVIOUS_OWNER` / `ERECLAIM_UNTRUSTED_PEER`，归属不变 |
+| T7d | 陈旧 epoch | 用 `N-1` 发 reclaim | `ERECLAIM_EPOCH_MISMATCH`，归属不变 |
 | T8 | 租约过期后 reclaim | 超过 `lease_ms` | 拒绝并给 `ERECLAIM_LEASE_EXPIRED`；设备归属不变 |
 | T9 | 陈旧 epoch 破坏性命令 | 带 `epoch-1` 发 `SetIrqs` 空 fd | 拒绝并诊断 |
 | T10 | 单客户端回归 | `--max-clients 1` | 与基线逐字节一致 |
