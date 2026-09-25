@@ -384,7 +384,12 @@ fn memfd(size: u64) -> File {
 ///
 /// Returns `(server, owner, candidate, epoch_at_staging)`.
 fn owner_and_candidate(name: &str) -> (Server, Peer, Peer, u64) {
-    let server = Server::start(name, &[]);
+    owner_and_candidate_with(name, &[])
+}
+
+/// Same, with extra command-line flags for the server.
+fn owner_and_candidate_with(name: &str, extra: &[&str]) -> (Server, Peer, Peer, u64) {
+    let server = Server::start(name, extra);
     let mut src = Peer::connect(&server);
     src.prepare();
     server.await_log("event ring segment table is at");
@@ -1027,4 +1032,44 @@ fn a_handover_without_an_attached_device_is_refused() {
             .contains("pretending no USB device is attached"),
         "the injected empty inventory must be visible in the log"
     );
+}
+
+#[test]
+fn a_reclaim_after_the_lease_is_refused() {
+    // The lease bounds the controller's rollback decision: once it has expired,
+    // a hand-over that succeeded stays succeeded, so a late actor cannot pull the
+    // device back out from under a running destination.
+    let (server, mut src, mut dst, boot_epoch) =
+        owner_and_candidate_with("lease", &["--handover-lease-ms", "300"]);
+    expect_ok(&server, &HandoverCommand::Ready { conn: dst.id() });
+    let committed = expect_ok(
+        &server,
+        &HandoverCommand::Commit {
+            conn: dst.id(),
+            epoch: boot_epoch,
+        },
+    );
+    assert_eq!(committed.owner, Some(dst.id()));
+    assert_eq!(dst.wait_for_kick(), 1);
+
+    sleep(Duration::from_millis(700));
+    expect_refusal(
+        &server,
+        &HandoverCommand::Reclaim {
+            conn: src.id(),
+            epoch: committed.epoch,
+        },
+        "ERECLAIM_LEASE_EXPIRED",
+    );
+    let after = status(&server);
+    assert_eq!(after.owner, Some(dst.id()), "the owner must not change");
+    assert_eq!(after.epoch, committed.epoch, "the epoch must not change");
+    // The destination's line is still the live one.
+    dst.register();
+    assert_eq!(
+        dst.wait_for_kick(),
+        1,
+        "the destination must keep a working line"
+    );
+    src.assert_no_kick();
 }
