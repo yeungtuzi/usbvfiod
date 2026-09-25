@@ -15,6 +15,20 @@
 # nevertheless re-creates the destination's serial device, which resets the
 # guest tty, so the *authoritative* result is read from the guest's own
 # /root/demo.log after stopping the VMs and mounting the disk image.
+#
+# The device hand-over is driven from here, not from the VMM. usbvfiod stages
+# the destination's interrupt registration as a *candidate* and only installs it
+# when the control socket says so, so the harness is the one that decides when
+# the device changes hands:
+#
+#   candidate seen + source paused  ->  ready  ->  commit
+#
+# and, if `send-migration` comes back with an error, `reclaim` puts the device
+# back in the source's hands. That is what keeps the source usable when a
+# migration does not take: the line never moved, or it moved back.
+#
+# HANDOVER=commit   drive ready+commit (default)
+# HANDOVER=none     never commit; for measuring what the staging alone changes
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,6 +37,9 @@ CH="${CH:-/root/lvllm/cloud-hypervisor/target/release/cloud-hypervisor}"
 CHR="${CHR:-$(dirname "$CH")/ch-remote}"
 USBVF="${USBVF:-$REPO/target/debug/usbvfiod}"
 DEVICE="${DEVICE:-/dev/bus/usb/001/007}"
+REMOTE="${REMOTE:-$REPO/target/debug/remote}"
+# How the harness drives the hand-over: commit (default) or none.
+HANDOVER="${HANDOVER:-commit}"
 RUN="${RUN:-/run/usb-demo}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"
 COPY_TIMEOUT="${COPY_TIMEOUT:-120}"
@@ -114,11 +131,111 @@ wait_api() { # wait_api <socket> <name>
   return 1
 }
 
+# --- two-phase hand-over control ---------------------------------------------
+# The control protocol is line-oriented and the `remote` tool resolves the role
+# keywords (`candidate`, `prev`, `owner`) through a status query, so the harness
+# never has to track connection ids itself.
+status_field() { # status_field <key>
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status 2>/dev/null \
+    | grep -aoE "$1=[^ ]*" | head -1 | cut -d= -f2
+}
+
+# Wait for the destination's device activation, i.e. for its interrupt
+# registration to be staged, then commit it once the source has stopped running.
+#
+# Committing as early as possible is the whole point: the interval between the
+# source's pause and the commit is the window in which the destination can run
+# without an interrupt line, so the controller polls fast and acts immediately.
+handover_controller() {
+  local i=0 cand
+  while [ "$i" -lt 2400 ]; do
+    cand="$(status_field candidate)"
+    if [ -n "$cand" ] && [ "$cand" != "-" ]; then break; fi
+    sleep 0.025; i=$((i + 1))
+  done
+  if [ -z "$cand" ] || [ "$cand" = "-" ]; then
+    log "hand-over: no candidate appeared; the source keeps the device"
+    printf 'none\n' > "$RUN/handover.mode"
+    return 1
+  fi
+  date +%s.%N > "$RUN/handover.candidate"
+  log "hand-over: destination staged as candidate $cand ($(status_field epoch) is the current epoch)"
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.staged" 2>&1
+
+  # Injected failure: the destination dies in the window in which the *old*
+  # implementation had already stolen the source's line. This is the case the
+  # staging exists for, so nothing may be committed here.
+  if [ "${KILL_DST_WHEN_STAGED:-0}" = "1" ]; then
+    log "hand-over: INJECTED FAILURE: killing the destination while it is only staged"
+    kill -9 "$DST_PID" 2>/dev/null
+    printf 'destination-died-while-staged\n' > "$RUN/handover.mode"
+    return 1
+  fi
+
+  # The source must have stopped executing before the device may move: before
+  # that it is still the one using the stick. CH pauses the source before the
+  # destination activates its devices, so this is normally already true; waiting
+  # for the event makes the order explicit instead of assumed.
+  local j=0
+  while [ "$j" -lt 400 ]; do
+    grep -q '"event": "paused"' "$RUN/src.events" 2>/dev/null && break
+    sleep 0.025; j=$((j + 1))
+  done
+
+  case "$HANDOVER" in
+    none)
+      printf 'none\n' > "$RUN/handover.mode"
+      log "hand-over: HANDOVER=none, leaving the candidate staged"
+      return 0
+      ;;
+    commit)
+      "$REMOTE" --socket "$RUN/hotplug.sock" --handover-ready candidate \
+        >> "$RUN/handover.log" 2>&1
+      date +%s.%N > "$RUN/handover.commit"
+      "$REMOTE" --socket "$RUN/hotplug.sock" --handover-commit candidate \
+        >> "$RUN/handover.log" 2>&1
+      printf 'commit\n' > "$RUN/handover.mode"
+      "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.committed" 2>&1
+      log "hand-over: committed; owner is now $(status_field owner), previous owner $(status_field prev)"
+      if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ]; then
+        log "hand-over: INJECTED FAILURE: killing the destination VMM after the commit"
+        kill -9 "$DST_PID" 2>/dev/null
+      fi
+      ;;
+    *)
+      log "ERROR: unknown HANDOVER=$HANDOVER"; return 1 ;;
+  esac
+}
+
+# If the migration did not take, the device has to go back to the source. When
+# the failure happened before the commit nothing moved and this is a no-op that
+# the server refuses with ERECLAIM_NOT_PREVIOUS_OWNER; when it happened after the
+# commit the source gets a working line back.
+handover_rollback() {
+  local reason="$1"
+  [ "$(cat "$RUN/handover.mode" 2>/dev/null)" = "commit" ] || {
+    log "hand-over: nothing to roll back ($reason)"
+    return 0
+  }
+  log "hand-over: $reason; asking for the device back"
+  date +%s.%N > "$RUN/handover.reclaim"
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-reclaim prev \
+    >> "$RUN/handover.log" 2>&1
+  local rc=$?
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.reclaimed" 2>&1
+  log "hand-over: reclaim exit=$rc; owner is now $(status_field owner)"
+  return 0
+}
+
 # --- 1. usbvfiod claims the physical stick -----------------------------------
 "$USBVF" --socket-path "$RUN/usbvfiod.sock" --max-clients 4 \
+  --hotplug-socket-path "$RUN/hotplug.sock" \
   --device "$DEVICE" --pcap-path "$RUN/usb.pcap" -v > "$RUN/usbvfiod.log" 2>&1 &
 USB_PID=$!; pids+=($USB_PID)
-for _ in $(seq 1 40); do [ -S "$RUN/usbvfiod.sock" ] && break; sleep 0.25; done
+for _ in $(seq 1 40); do
+  [ -S "$RUN/usbvfiod.sock" ] && [ -S "$RUN/hotplug.sock" ] && break
+  sleep 0.25
+done
 if grep -q 'Attached' "$RUN/usbvfiod.log"; then
   step "1/6 usbvfiod claimed $DEVICE (host driver switched to usbfs)"
 else
@@ -126,7 +243,7 @@ else
 fi
 
 # --- 2. source VM: guest boots and starts copying from the stick -------------
-"$CH" -v --api-socket "$RUN/src.sock" \
+"$CH" -v --api-socket "$RUN/src.sock" --event-monitor "path=$RUN/src.events" \
   --memory size=2G,shared=on --cpus boot=1 \
   --kernel "$DIR/casper/vmlinuz" --initramfs "$DIR/initrd-custom.gz" \
   --disk "path=$DIR/rootfs.img,image_type=raw" \
@@ -143,7 +260,7 @@ step "3/6 copy in flight; starting the destination"
 [ "${COPY_LEAD_SECONDS}" != "0" ] && sleep "$COPY_LEAD_SECONDS"
 
 # --- 3. destination VM + live migration -------------------------------------
-"$CH" -v --api-socket "$RUN/dst.sock" > "$RUN/dst.log" 2>&1 &
+"$CH" -v --api-socket "$RUN/dst.sock" --event-monitor "path=$RUN/dst.events" > "$RUN/dst.log" 2>&1 &
 DST_PID=$!; pids+=($DST_PID)
 wait_api "$RUN/dst.sock" destination || exit 1
 "$CHR" --api-socket "$RUN/dst.sock" receive-migration receiver_url=unix:"$RUN/mig.sock" \
@@ -178,12 +295,31 @@ if ! wait_copy_progress "$COPY_TRIGGER_BYTES" "$COPY_TRIGGER_TIMEOUT"; then
   sleep "$COPY_LEAD_SECONDS"
 fi
 
-step "4/6 starting the live migration"
+step "4/6 starting the live migration, driven by the hand-over controller"
+: > "$RUN/handover.log"
 MIGRATION_EPOCH=$(date +%s.%N)
+# In the background: the migration only completes once the harness commits the
+# hand-over, so the foreground is the controller.
 "$CHR" --api-socket "$RUN/src.sock" \
   send-migration destination_url=unix:"$RUN/mig.sock",memory_mode=memfds,downtime_ms=300,timeout_strategy=cancel \
-  > "$RUN/send.log" 2>&1
-log "send-migration exit=$?"
+  > "$RUN/send.log" 2>&1 &
+SEND_PID=$!
+handover_controller
+wait "$SEND_PID"; SEND_RC=$?
+log "send-migration exit=$SEND_RC"
+if [ "$SEND_RC" != "0" ] || grep -q 'Migration failed' "$RUN/src.log" 2>/dev/null; then
+  handover_rollback "the migration did not complete"
+else
+  log "hand-over: the migration completed; the destination keeps the device"
+fi
+# Sample the ownership again once the dust has settled: after a failure the
+# source VMM may have reconnected, and the status is what says who owns what.
+if [ "${KILL_DST_AFTER_COMMIT:-0}" = "1" ]; then
+  sleep 20
+  date +%s.%N > "$RUN/handover.aftermath.time"
+  "$REMOTE" --socket "$RUN/hotplug.sock" --handover-status > "$RUN/handover.aftermath" 2>&1
+  log "hand-over: aftermath: $(cat "$RUN/handover.aftermath" 2>/dev/null)"
+fi
 # send-migration returns when the switchover has completed. Recording that
 # instant as well lets the verdict require the *whole* migration, not just the
 # request, to fall inside the copy window - otherwise a run could "span" the
@@ -217,6 +353,13 @@ sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g' "$RUN/console.log" > "$CLEAN"
 echo
 GLOG="$RUN/guest-demo.log"
 
+echo "--- hand-over control (harness) ---"
+echo "mode                      : $(cat "$RUN/handover.mode" 2>/dev/null || echo '<none>')"
+echo "destination staged at     : $(cat "$RUN/handover.candidate" 2>/dev/null || echo '<never>')"
+echo "hand-over committed at    : $(cat "$RUN/handover.commit" 2>/dev/null || echo '<never>')"
+echo "status after staging      : $(cat "$RUN/handover.staged" 2>/dev/null || echo '<none>')"
+echo "status after commit       : $(cat "$RUN/handover.committed" 2>/dev/null || echo '<none>')"
+echo "remote log                : $(tr '\n' '|' < "$RUN/handover.log" 2>/dev/null)"
 echo "--- hand-over path evidence (server log) ---"
 echo "client handshakes         : $(grep -ac 'Received client version' "$RUN/usbvfiod.log")"
 echo "interrupt lines installed : $(grep -ac 'interrupt line installed' "$RUN/usbvfiod.log")"
@@ -233,11 +376,20 @@ echo
 # console can lose output exactly around the migration, because the destination
 # re-creates the serial device and resets the guest TTY.
 chmod +x "$DIR/verdict.py"
+# A run in which the migration failed and the source was resumed is judged by
+# different criteria (see verdict.py --expect-failure): the device has to survive
+# the failure, not migrate. The mode is derived from the VMM log so a caller
+# cannot forget to declare it.
+EXPECT_FAILURE_ARGS=()
+if grep -q 'Resumed VM successfully after failed migration' "$RUN/src.log" 2>/dev/null; then
+  log "the source was resumed after a failed migration; judging the run as a recovery run"
+  EXPECT_FAILURE_ARGS=(--expect-failure)
+fi
 DOWNTIME_MS=$(grep -aoE 'downtime of [0-9]+ms' "$RUN/src.log" | grep -aoE '[0-9]+' | head -1)
 # Pass the downtime through unchanged (possibly empty). Defaulting it to 0 here
 # made a missing "downtime of Nms" line look like a perfect 0 ms run, so the
 # budget criterion could never fail for the one reason it exists to catch.
-"$DIR/verdict.py" --guest-log "$GLOG" \
+"$DIR/verdict.py" "${EXPECT_FAILURE_ARGS[@]}" --guest-log "$GLOG" \
   --expected-md5 "$(awk '{print $1}' "$DIR/testfile.md5")" \
   --migration-epoch "$MIGRATION_EPOCH" \
   --migration-done "${MIGRATION_DONE:-}" \

@@ -74,6 +74,14 @@ def main() -> int:
                          "is given and this is missing the run FAILS (fail closed)")
     ap.add_argument("--max-downtime-ms", type=float, default=None,
                     help="acceptance budget; enforced when given")
+    ap.add_argument("--expect-failure", action="store_true",
+                    help="the run is expected to end with the migration having "
+                         "failed and the source resumed. The acceptance criteria "
+                         "change accordingly: there is no completed switchover to "
+                         "place inside the copy window, so instead the copy must "
+                         "survive the failure (finish with the right digest after "
+                         "the source was resumed) and the device must not have been "
+                         "re-enumerated or reset.")
     ap.add_argument("--src-log", default=None,
                     help="optional Cloud Hypervisor source log. When given, the "
                          "instants at which CH logged the VM as paused and the "
@@ -120,6 +128,7 @@ def main() -> int:
     ch_rel = {}
     pause_host = None
     completed_host = None
+    resume_host = None
     if args.src_log:
         try:
             lines = open(args.src_log, errors="replace").read().splitlines()
@@ -136,6 +145,8 @@ def main() -> int:
                 ch_rel["paused"] = t
             elif "Migration completed after" in line:
                 ch_rel["completed"] = t
+            elif "Resumed VM successfully after failed migration" in line:
+                ch_rel["resumed"] = t
         if "req" in ch_rel:
             if "paused" in ch_rel:
                 pause_host = args.migration_epoch + (ch_rel["paused"] - ch_rel["req"])
@@ -145,9 +156,30 @@ def main() -> int:
                 completed_host = args.migration_epoch + (ch_rel["completed"] - ch_rel["req"])
                 print(f"migration completed  : {completed_host:.3f} (host clock, "
                       f"{1000 * (ch_rel['completed'] - ch_rel['req']):.2f} ms after the request)")
+            if "resumed" in ch_rel:
+                resume_host = args.migration_epoch + (ch_rel["resumed"] - ch_rel["req"])
+                print(f"source resumed       : {resume_host:.3f} (host clock, "
+                      f"{1000 * (ch_rel['resumed'] - ch_rel['req']):.2f} ms after the request)")
+
+    if args.expect_failure:
+        # There is no completed migration to place inside the copy window. What
+        # has to hold instead is that the *failure* was survived: the source was
+        # resumed, the copy finished afterwards with the right digest, and the
+        # device was not torn down and re-enumerated.
+        if "resumed" not in ch_rel:
+            print("source resumed       : MISSING (the run was expected to fail "
+                  "the migration and resume the source)")
+            failures.append("source-not-resumed-after-failure")
+        continued = (done is not None and resume_host is not None and done > resume_host)
+        print(f"copy continued after failure: {'YES' if continued else 'NO'}")
+        if not continued:
+            failures.append("copy-did-not-continue-after-failure")
+        print(f"mode                 : expected migration failure, source kept running")
 
     switchover_inside = None
-    if completed_host is not None:
+    if args.expect_failure:
+        pass
+    elif completed_host is not None:
         switchover_inside = done is not None and args.migration_epoch <= completed_host < done
         print(f"whole migration inside copy: {'YES' if switchover_inside else 'NO'}")
         spans = spans and switchover_inside
@@ -191,22 +223,27 @@ def main() -> int:
     # --- 3/4. cutoff from the heartbeat pairs --------------------------------
     beats = [(float(e), float(u)) for _, e, u in
              re.findall(r"DEMO-HEARTBEAT (\d+) ([0-9.]+) uptime=([0-9.]+)", text)]
+    # The cutoff that splits "before" from "after" is the instant the guest
+    # changed hands: the migration request for a normal run, the source being
+    # resumed for a run whose migration failed.
+    anchor = resume_host if (args.expect_failure and resume_host is not None) else args.migration_epoch
     mig_uptime = None
     if beats:
         beats.sort()
         for (e0, u0), (e1, u1) in zip(beats, beats[1:]):
-            if e0 <= args.migration_epoch <= e1 and e1 > e0:
-                mig_uptime = u0 + (args.migration_epoch - e0) * (u1 - u0) / (e1 - e0)
+            if e0 <= anchor <= e1 and e1 > e0:
+                mig_uptime = u0 + (anchor - e0) * (u1 - u0) / (e1 - e0)
                 break
         if mig_uptime is None:
-            e0, u0 = beats[0] if args.migration_epoch < beats[0][0] else beats[-1]
-            mig_uptime = u0 + (args.migration_epoch - e0)
+            e0, u0 = beats[0] if anchor < beats[0][0] else beats[-1]
+            mig_uptime = u0 + (anchor - e0)
     print(f"heartbeats           : {len(beats)}")
+    label = "guest uptime @resume:" if args.expect_failure else "guest uptime @migr. :"
     if mig_uptime is None:
-        print("guest uptime @migr.  : <unavailable>")
+        print(f"{label} <unavailable>")
         failures.append("no-heartbeats-cutoff-unavailable")
     else:
-        print(f"guest uptime @migr.  : {mig_uptime:.2f} s")
+        print(f"{label} {mig_uptime:.2f} s")
 
     dmesg = []
     in_dmesg = False
@@ -260,7 +297,8 @@ def main() -> int:
     dt = args.downtime_ms
     print(f"downtime             : {dt if dt is not None else '<unknown>'} ms"
           + (f" (budget {args.max_downtime_ms:.0f} ms)" if args.max_downtime_ms else ""))
-    if args.max_downtime_ms is not None and (dt is None or dt > args.max_downtime_ms):
+    if (args.max_downtime_ms is not None and not args.expect_failure
+            and (dt is None or dt > args.max_downtime_ms)):
         failures.append("downtime-over-budget-or-unknown")
 
     if failures:

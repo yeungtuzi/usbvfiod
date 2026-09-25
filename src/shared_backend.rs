@@ -310,11 +310,27 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
 
     /// Called when a connection's command loop ends.
     ///
-    /// If the *owner* disappeared while a previous owner is still connected and
-    /// the lease has not expired, the device goes back to the previous owner.
-    /// This is the destination-crashed case and needs no external coordination;
-    /// after a successful migration it cannot fire, because the connection that
-    /// disappears is the previous owner, not the owner.
+    /// An owner that disappears must not keep the device, because a dead
+    /// connection cannot service an interrupt. Three things can happen, in order
+    /// of preference:
+    ///
+    /// 1. the **previous owner** is still connected: the device goes back to it.
+    ///    This is the destination-crashed case and needs no external
+    ///    coordination. After a *successful* migration it cannot fire, because
+    ///    the connection that disappears then is the previous owner, not the
+    ///    owner;
+    /// 2. a **candidate is staged**: it is promoted. Somebody has to serve the
+    ///    device, and a live connection that has already published memory and an
+    ///    interrupt line is the only claimant left. This is the source-died case
+    ///    of a successful migration, and promoting makes the hand-over complete
+    ///    without the controller;
+    /// 3. otherwise the device becomes **unowned**, exactly as at boot, so the
+    ///    next registration claims it immediately. A VMM that reconnects after a
+    ///    failed migration therefore gets its device back with no controller
+    ///    involvement.
+    ///
+    /// Only the ownership *decision* is made here; the line is installed and the
+    /// new owner is kicked, so the guest re-examines the event ring.
     pub fn disconnect(&self, id: u64) {
         let mut o = self.lock_ownership();
         o.live.remove(&id);
@@ -322,34 +338,76 @@ impl<CRD: CompleteRealDevice> SharedBackendState<CRD> {
         if o.owner != id {
             return;
         }
-        let can = o.auto_reclaim
-            && o.prev != NO_OWNER
-            && o.live.contains(&o.prev)
-            && o.committed_at.is_some_and(|t| t.elapsed() <= o.lease);
-        if !can {
-            info!("owner connection {id} closed (no automatic reclaim)");
-            return;
-        }
-        let prev = o.prev;
-        let Some(reg) = o.prev_reg.take() else {
-            return;
-        };
-        match self.install_registration(&reg) {
-            Ok(recorded) => {
-                o.owner = prev;
-                o.prev = NO_OWNER;
-                o.owner_reg = Some(recorded);
-                o.epoch += 1;
-                info!(
-                    "auto-reclaimed the device for client {prev} because the committed owner {id} disconnected (epoch {})",
-                    o.epoch
-                );
+        let now = Instant::now();
+
+        // 1. The previous owner takes it back.
+        //
+        // The lease that bounds the *controller's* reclaim does not apply here:
+        // it exists so that a late actor cannot roll back a hand-over that has
+        // already succeeded, whereas this path only runs when the owner is
+        // provably gone. Refusing to fall back would leave the device owned by a
+        // connection that no longer exists, which is strictly worse than handing
+        // it to the connection that held it before.
+        if o.auto_reclaim && o.prev != NO_OWNER && o.live.contains(&o.prev) {
+            let prev = o.prev;
+            if let Some(reg) = o.prev_reg.take() {
+                match self.install_registration(&reg) {
+                    Ok(recorded) => {
+                        o.owner = prev;
+                        o.prev = NO_OWNER;
+                        o.owner_reg = Some(recorded);
+                        o.committed_at = Some(now);
+                        o.epoch += 1;
+                        info!(
+                            "auto-reclaimed the device for client {prev} because the owner {id} disconnected (epoch {})",
+                            o.epoch
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        o.prev_reg = Some(reg);
+                        warn!("auto-reclaim failed, falling through to the next option: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                o.prev_reg = Some(reg);
-                warn!("auto-reclaim failed: {e}");
+        }
+
+        // 2. A staged candidate is promoted.
+        if o.auto_reclaim {
+            if let Some(cand) = o.candidate.take() {
+                match self.install_registration(&cand.reg) {
+                    Ok(recorded) => {
+                        o.owner = cand.id;
+                        o.prev = NO_OWNER;
+                        o.prev_reg = None;
+                        o.owner_reg = Some(recorded);
+                        o.committed_at = Some(now);
+                        o.epoch += 1;
+                        info!(
+                            "promoted the staged candidate {} because the owner {id} disconnected (epoch {})",
+                            cand.id, o.epoch
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("promoting the candidate failed, leaving the device unowned: {e}");
+                    }
+                }
             }
         }
+
+        // 3. Nobody can serve the device.
+        o.owner = NO_OWNER;
+        o.owner_reg = None;
+        o.prev = NO_OWNER;
+        o.prev_reg = None;
+        o.candidate = None;
+        o.committed_at = None;
+        o.epoch += 1;
+        warn!(
+            "owner connection {id} closed and nothing could take the device over; it is unowned (epoch {}), the next registration claims it",
+            o.epoch
+        );
     }
 
     /// Install a registration by re-issuing `SetIrqs` with cloned descriptors.
@@ -808,6 +866,25 @@ impl<CRD: CompleteRealDevice> ServerBackend for SharedBackend<CRD> {
             "hand-over candidate: client {} staged (owner {} keeps the line until commit)",
             self.id, o.owner
         );
+
+        // Test hook (debug builds only): hold the reply to the destination's
+        // registration for a while. The destination VMM blocks on this reply
+        // while it activates the device, so the hook keeps the migration in the
+        // switchover window and makes it possible to fail the migration *after*
+        // the destination has asked for the device - the case the staging exists
+        // for. The owner is not touched while this sleeps.
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("USBVFIOD_INJECT_STAGING_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            warn!(
+                "TEST HOOK: delaying the candidate's registration reply by {ms} ms \
+                 (USBVFIOD_INJECT_STAGING_DELAY_MS)"
+            );
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+
         Ok(())
     }
 }

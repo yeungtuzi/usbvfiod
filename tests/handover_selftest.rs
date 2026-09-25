@@ -724,3 +724,98 @@ fn the_ownership_guard_is_load_bearing() {
     // thing left that can put a line back.
     dst.assert_no_kick();
 }
+
+#[test]
+fn a_dead_owner_lets_the_next_registration_take_over() {
+    // The owner dying with nobody left to serve the device must not leave the
+    // device owned by a dead connection: a VMM that reconnects after a failed
+    // migration has to get its device back without the controller doing anything.
+    let (server, src, mut dst, boot_epoch) = owner_and_candidate("orphan");
+    expect_ok(&server, &HandoverCommand::Ready { conn: dst.id() });
+    let committed = expect_ok(
+        &server,
+        &HandoverCommand::Commit {
+            conn: dst.id(),
+            epoch: boot_epoch,
+        },
+    );
+    assert_eq!(committed.owner, Some(dst.id()));
+    assert_eq!(dst.wait_for_kick(), 1);
+
+    // Both connections go away: the source first, so that the destination's
+    // death has no previous owner left to fall back to.
+    src.disconnect();
+    drop(src);
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            status(&server).owner == Some(dst.id())
+        })
+        .is_ok(),
+        "the destination still owns the device while it is alive"
+    );
+    dst.disconnect();
+    drop(dst);
+    assert!(
+        wait_until(Duration::from_secs(5), || status(&server).owner.is_none()).is_ok(),
+        "a dead owner must not keep the device; status was {:?}",
+        status(&server)
+    );
+    assert!(
+        server.log().contains("it is unowned"),
+        "the device becoming unowned must be logged"
+    );
+
+    // The next connection to register claims it immediately, as at boot.
+    let mut reconnected = Peer::connect(&server);
+    reconnected.prepare();
+    reconnected.register();
+    adopt(&server, &mut reconnected, |s| s.owner);
+    assert_eq!(
+        status(&server).candidate,
+        None,
+        "claiming an unowned device must not go through staging"
+    );
+    assert_eq!(
+        reconnected.wait_for_kick(),
+        1,
+        "the reconnected VMM must get a working line"
+    );
+}
+
+#[test]
+fn a_staged_candidate_is_promoted_when_the_owner_dies() {
+    // The other half of the same problem: if the source disappears while the
+    // destination is staged, the destination is the only claimant left and has to
+    // be able to serve the device.
+    let (server, src, mut dst, boot_epoch) = owner_and_candidate("promote");
+    assert_eq!(status(&server).epoch, boot_epoch);
+    src.disconnect();
+    drop(src);
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            status(&server).owner == Some(dst.id())
+        })
+        .is_ok(),
+        "the staged candidate must be promoted; status was {:?}",
+        status(&server)
+    );
+    let promoted = status(&server);
+    assert_eq!(
+        promoted.candidate, None,
+        "the promotion consumes the candidate"
+    );
+    assert_eq!(
+        promoted.epoch,
+        boot_epoch + 1,
+        "the promotion moves the epoch"
+    );
+    assert_eq!(
+        dst.wait_for_kick(),
+        1,
+        "the promoted owner must get a working line"
+    );
+    assert!(
+        server.log().contains("promoted the staged candidate"),
+        "the promotion must be logged"
+    );
+}
