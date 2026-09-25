@@ -1091,7 +1091,54 @@ checker 现在报 `OK: 0 identifying match(es) in 162 files`，快照重新生�
 （它本身会跑 checker），而不是只跑 `redact-identifiers.py`；因为只有前者会在
 **解包后的树**上复核，并拒绝脏工作区。
 
-### D27.4 未完成、需要决策的一项
+### D27.4 收尾轮（轮次 9）补的三件事与一次自伤
+
+1. **A4/A5 补齐**：A4 现在真的校验"这是不是一个 eventfd"（读 `/proc/self/fdinfo` 要
+   `eventfd-count`），并修掉 `InterruptEventFd::interrupt` 里的 `expect`——客户端给的 fd
+   不该能把 interrupter worker 打死；A5（设备仍在）由控制面在每个交接命令前刷新设备清单、
+   预检消费它（`--handover-require-device` 可关，无控制面时不误伤）。测试各一个，都断言源端不 kick。
+2. **T8 补测**：commit 后等租约过期再 reclaim → `ERECLAIM_LEASE_EXPIRED`，归属与 epoch 不变、
+   目标端线仍可被 kick。
+3. **T10 单客户端回归**：`MAX_CLIENTS=1 SKIP_MIGRATION=1` 真机跑通（md5 一致、1 次装线）。
+4. **一次自伤（写进纪律）**：我在 `usb-migration-demo.sh` **正在执行**的时候去编辑它，
+   bash 是按字节偏移边读边执行的，于是后半段被读成了碎片
+   （`syntax error near unexpected token 'then'`，`Z1=2`）。
+   教训：**脚本运行期间不得修改该脚本**（以及运行期间不要重编它调用的二进制）。
+
+### D27.5 CH 事件：我们的程序可以主动订阅（已实测）
+
+CH 的 `--event-monitor` 支持 `fd=<n>`：它把那个 fd `File::from_raw_fd` 收走，并把每个事件写成
+pretty JSON + 一个空行（`event_monitor/src/lib.rs`；写循环在
+`vmm/src/lib.rs::start_event_monitor_thread`）。所以**我们自己开一个 socketpair、把一端当参数给它、
+在另一端读**，就是主动推送订阅——不落盘、不扫日志、不轮询。
+
+实测（新增 `guest/event-monitor-fd.py`，`fd=` 方式，一次最小 VM 启动）：
+
+```
+launching: cloud-hypervisor --api-socket …/api.sock --event-monitor fd=4 --memory size=512M …
+  + 0.004s   vmm / starting
+  + 0.004s   vmm / started
+  + 0.008s    vm / booting
+  + 0.407s    vm / booted          ← 事件到达与发出几乎同时（微秒级排队）
+events received: 5
+```
+
+边界与注意：
+
+- **不保证不丢**：监听线程用非阻塞 fd 写且 `write_all(...).ok()`，读端堵塞会静默丢事件；
+  而且 JSON 与分隔符是两次 write，满缓冲时甚至会把一个事件截断。所以订阅端必须及时 drain。
+- **同一份写入路径**：`path=` 与 `fd=` 只是 `Option<File>` 的两种来源，写循环完全一致，
+  因此 E1 里看到的 `migration-started/paused/resumed/…` 同样会从 fd 出来。
+- **不是 REST 订阅**：这个 CH 版本没有 HTTP 事件端点；D-Bus API（需 `dbus_api` feature）才有
+  `monitor.subscribe()` 那种进程外推送。
+- **seccomp 允许**：`common_thread_rules()` 无条件放行 `write`，socketpair 写入不受限。
+- **usbvfiod 自己不能也不该订阅**：它是 vfio-user 后端，CH 连它、它没有 CH 的 API socket；
+  把 VMM 协议与策略塞进设备后端会破坏"机制在 usbvfiod、策略在控制器"的分层与信任边界。
+  能订阅的是**控制器/harness**（demo 里正是我们启动 CH 的）。
+- 顺带解决 D25.6/12.2-M3 里那个"日志块缓冲导致控制器看不到候选"的问题：
+  控制器的触发应当走 fd 订阅（或 M6 的阻塞式应答），而不是 tail 日志。
+
+### D27.6 未完成、需要决策的一项
 
 **M6 绑定式预检**（把"目标端注册的应答"挂住到控制器决定为止，见 §9.3）：
 D26.3 已说明，这是让"缺东西就保持旧环境"成为**强制**语义的唯一办法。

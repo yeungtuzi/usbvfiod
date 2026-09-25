@@ -504,3 +504,66 @@ bootstrap 中位数区间 [5,17]、宿主负载相关系数 −0.376、最近枚
   （sha256 `bcd17fcc…`，无 `.git`、无 commit id，解包后检查器从两个 cwd 均通过）
 - 原始证据：文本日志在 `artifacts/`；161 个 pcap（20.5 GB）在
   `/mnt/mt/usbvfiod-artifacts/`，附 `SHA256SUMS-pcap`
+
+---
+
+## 第十二部分：轮次 9 评审（两阶段设备交接的实现与实测，2026-09-25）
+
+**本轮范围**：把"多客户端 + 陈旧客户端保护"升级为**两阶段设备交接**
+（注册=暂存候选 → 预检 → 控制通道显式 `commit` / `abort` / 租约内 `reclaim` +
+owner 连接消失时的三级兜底），补齐 A4/A5 预检，把真机 harness 改成**事件驱动**判定迁移结果，
+并用真实虚拟机做成功与失败两组实验。工件：8 个提交（`cf17db0..`）、12 个无 guest 端到端测试、
+`docs/handover-two-phase-design_cn.md` 的修订、`paper/main.pdf` 14 页、匿名快照重建。
+
+### 12.1 系统方向
+
+| # | 发现 | 处理 |
+|---|---|---|
+| S1 | **显式 `commit` 不在自然成功路径的关键路径上**：CH 在"目标端注册"后 3.7–8.3 ms 就 deactivate 源端设备并关闭连接，而 `ready`+`commit` 需要两次往返（实测 23.9 ms），所以自然路径上闭合窗口的是**兜底提升** | **不做成"控制器驱动"的假象**：论文在 §Failure recovery 明确写"the automatic fallback is what closes the natural case"，并在限制段指出"让预检成为强制语义需要挂住目标端注册应答"（下一步 M6）。这是本轮最重要的诚实化 |
+| S2 | 兜底提升如果不过预检，会把设备交给一个 DMA 都发布不全的连接 | 提升必须通过**自动预检**（A3 覆盖 + A4 描述符），失败则退化为 unowned；有测试 |
+| S3 | 预检读"注册那一刻"的 DMA 快照 → 真机上误拒（目标端 `DmaMap` 晚 0.06–0.3 ms） | 改为读**活状态**；加回归测试（见 12.2 M1） |
+| S4 | `A4` 原本只检查 `metadata()`，任何可读 fd 都能装上线 | 改为读 `/proc/self/fdinfo` 要求 `eventfd-count`；并修掉 `InterruptEventFd::interrupt` 里的 `expect`——客户端给的 fd 不该能把 interrupter worker 打死（改为 warn） |
+| S5 | `A5`（设备仍在）在设计里是硬条件但**没有实现** | 设备的在线情况只能通过 hot-plug port 的异步通道查询，因此由**控制面在每个交接命令前刷新**，预检消费它；`--handover-require-device` 可关（无控制面时不误伤），有注入空清单的测试 |
+| S6 | M6（把注册应答挂住到控制器决定为止）未实现 | 列为待批准的行为变更，不自行实施；论文/设计/日志三处都写明 |
+
+**结论：Accept**（带 S1/S6 的明确限制声明）。
+
+### 12.2 实验方法学
+
+| # | 发现 | 处理 |
+|---|---|---|
+| M1 | **只有真机才暴露的回归**：合成测试按 `dma_map → set_irqs` 的"想当然"顺序写，正好把"VMM 先注册后发布内存"的真实顺序缺陷藏住；真机 T1 因此 FAIL（目标端 guest 35 s 后丢 USB 栈、9 条 IO 错误） | 修实现 + 用**实测顺序**写回归测试；并把"合成测试的顺序假设必须来自真机日志"写进开发日志 |
+| M2 | harness 用 `send-migration` 返回码 + 一次 grep 判定迁移结果 → 真机证明**返回 0 而源端随后记 `Migration failed`** | 改为**事件驱动**：读源端 `--event-monitor` 的 `migration-failed`/`resumed`/`shutdown`，并规定失败标记优先于 `shutdown` |
+| M3 | 一次运行里控制器报"no candidate appeared"，但日志显示候选确实存在过 | 定位为**stdout 块缓冲**（重定向到文件时 8 KiB 才落盘）+ 候选只活 7–8 ms；已记录：控制器的触发不应依赖日志刷新，M6 的阻塞式应答才是正解 |
+| M4 | 暴露窗口的锚点与样本量 | 自然成功运行 3 次（7.3/9.1/11.7、18.7/23.1/28.5、19.2/23.7/29.4 ms），注入撑开 1 次（320 ms）；窗口内完成数 0–3；宏取"最小下界 / 最大上界" |
+| M5 | 迁移"取消"在本 CH 版本没有独立 API（`timeout_strategy=cancel` 也不会取消已完成的迁移） | 用"目标端已注册后杀目标端"作为失败/取消的等价注入（T14），并明确论文不声称"取消 API"路径 |
+| M6 | 单客户端回归（T10）此前未在改动后重跑 | 新增 `MAX_CLIENTS=1` + `SKIP_MIGRATION=1` 控制臂，本轮实测（见 12.4） |
+
+**结论：Accept**（M3 的控制器触发限制已记录，M6 列为下一轮机制）。
+
+### 12.3 写作与工件
+
+| # | 发现 | 处理 |
+|---|---|---|
+| W1 | **匿名快照的最后一层检查失败**：`56 identifying match(es)`，全部是开发日志 D22 里的 fork 账号名原文——它是在上一轮 accept **之后**才写进去的 | 统一替换为既有 `<fork-owner>` 占位符；checker 报 0/162；快照重新生成并通过三层检查。纪律更新：**出件前必须跑完整的 `make-anonymous-snapshot.sh`**（它会在解包后的树上复核且拒绝脏工作区），而不是只跑 checker |
+| W2 | 论文若把两阶段写成"控制器驱动的成功迁移"就是编造 | 新增两节如实描述机制与实测，重写 "Failure and rollback" 限制段；新增 8 个自动生成宏（`data/two-phase.txt`），**没有一个数字是手写进 .tex 的** |
+| W3 | 快照摘要不能写进被快照包含的文件（自指） | 摘要改由构建脚本打印并写入同名 `.sha256`，开发日志不再内嵌摘要 |
+| W4 | 论文页数/编译 | `main.pdf` 14 页、`latexmk -halt-on-error` 0 error；`abstract_zh.pdf` 因本机缺 CTeX `fandol` 字体集**无法重编**，但其引用宏未变化（`results.tex` 只新增、未改动既有宏值），已核实 |
+
+**结论：Accept**。
+
+### 12.4 本轮实测清单（判定与原始日志）
+
+| 用例 | 方式 | 判定 | 日志 |
+|---|---|---|---|
+| T1 正常迁移 | 真机 + 控制器 | **PASS**（downtime 8 ms，md5 MATCH，0 重枚举，窗口 7.3–11.7 ms） | `usb-w1` / `usb-z3` |
+| T14 目标端已注册后迁移失败 | 真机 + 杀伤注入 | **PASS**（源端仍在 owner=0、epoch 未动、md5 MATCH、0 重枚举、0 reset/IO） | `usb-f2`/`usb-v2`/`usb-z2` |
+| T2 缺 DMA 映射 | 无 guest | 拒绝 `EPREFLIGHT_A3_DMA_INCOMPLETE`，源端不 kick | `handover_selftest` |
+| T3 坏 fd | 无 guest（`/dev/null`） | 拒绝 `EPREFLIGHT_A4_EVENTFD`，源端不 kick | 同上 |
+| T4 设备不在 | 无 guest（注入空清单） | 拒绝 `EPREFLIGHT_A5_DEVICE_GONE`，源端不 kick | 同上 |
+| T6 预检超时 | 无 guest | 过期 → `EPREFLIGHT_TIMEOUT`，源端可继续重注册 | 同上 |
+| T7 / T7c / T7d / T8 | 无 guest | reclaim 换线并 kick；非 prev / 陈旧 epoch / 租约过期分别拒绝且归属不变 | 同上 |
+| T7b / T7e / T7f | 无 guest | owner 死亡：归还 prev / 变 unowned 后下一个注册接管 / 提升暂存候选；都有 kick 证明 | 同上 |
+| T9 陈旧破坏性命令 | 无 guest | 忽略 + warn，新 owner 的线仍可 kick | 同上 |
+| T10 单客户端回归 | 真机（`MAX_CLIENTS=1`，无迁移） | **PASS**：复制 55.9 s、rc=0、md5 与期望一致、`interrupt lines inst.: 1`（单客户端路径无交接） | `usb-z4` |
+| T5 abort / 负对照 | 无 guest / 真机 | abort 不切换且 reason 入日志；无人 commit 时目标端 guest 约 35 s 后失去 USB 栈 | `usb-demo-t3` |
