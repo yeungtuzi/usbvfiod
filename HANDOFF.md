@@ -3,6 +3,11 @@
 > 用途：把本会话的工作从原服务器交接给**新的专用开发 PC**（100% 权限）。
 > 阅读顺序：先看 §0/§1，再看 §5 关键技术结论，然后按 §8 启动新机器，最后按 §9/§10 继续开发。
 > **本文件就在项目仓库内（`usbvfiod/HANDOFF.md`）：只需复制 `usbvfiod/` 目录，所有资料随仓库一起迁移。**
+> **署名约定（长期有效）**：所有推送到 GitHub 的提交/PR 一律使用
+> `Signed-off-by: BigHippo <dahema@me.com>` + `Assisted-by: DeepSeek:deepseek-flash`，
+> **不论目标项目是否要求**；说明与核对清单见 `docs/github-attribution_cn.md`，
+> 生成/检查用 `scripts/git-identity.sh`。
+>
 > （原工作区根目录另有一份同内容副本，但本次不复制工作区，因此以仓库内本文件为准。）
 
 ---

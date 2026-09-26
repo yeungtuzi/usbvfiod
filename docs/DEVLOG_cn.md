@@ -1453,3 +1453,26 @@ migration outcome       : failed（随后由 VETO 终止目标端）
   `[patch.crates-io]` 正是 pin 在这个 rev 上 → **我们自己跑的所有实测都用的是修好的客户端**，
   这也是为什么复位相关的行为一直是干净的。上游合不合并都不影响我们的可复现性；
   将来上游发了 0.1.7，才可以把 CH 的 patch 换成上游版本。
+
+## D35. 长期约定：所有 GitHub 署名统一（用户指示，2026-09-26）
+
+用户指示："**以后所有的 github 署名都按本次的约定办理，不管项目有没有明确要求**。"
+
+据此固化为长期规则（从下一条提交起生效，**不重写已发布历史**）：
+
+```
+Signed-off-by: BigHippo <dahema@me.com>
+Assisted-by: DeepSeek:deepseek-flash
+```
+
+- 作者/提交者身份也用同一个：`-c user.name=BigHippo -c user.email=dahema@me.com`；
+- 提交信息与 PR 描述都保持简短（上游维护者上一条 PR 的原话是 "a bit verbose"）；
+- `Signed-off-by` 与 `Assisted-by` **无论目标项目是否要求都写**；
+- 落点：`docs/github-attribution_cn.md`（权威说明 + 模板 + 核对清单）、
+  `scripts/git-identity.sh`（`--trailers` / `--configure` / `--check`，已自测：
+  在旧约定的 HEAD 上 `--check` 报缺两条，在上游 PR 提交 `59bf553` 上返回 OK）、
+  `HANDOFF.md` 顶部指针（新会话第一眼能看到）。
+
+**本约定不覆盖既有纪律**：对第三方仓库的任何写操作仍需**逐条批准**
+（署名规范只规定"怎么签"，不构成"可以签"）；已推送的旧提交保持原样，
+如需回填属于重写公开历史，需单独批准。
