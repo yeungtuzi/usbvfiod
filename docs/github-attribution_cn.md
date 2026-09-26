@@ -46,7 +46,12 @@ Assisted-by: DeepSeek:deepseek-flash
 
 1. **对第三方仓库的任何写操作（PR/issue/comment/review、以及会改变上游 PR 的 fork 推送）
    都必须逐条获得用户批准。** 署名规范只规定"怎么签"，不构成"可以签"的授权。
-2. **不重写已发布的历史。** 本约定自 2026-09-26 起对**新**提交生效；此前已推送的提交
+2. **上游 remote 在本地是不可推送的。** 两个工作副本（`/root/lvllm/usbvfiod`、
+   `/root/lvllm/vfio`）的 `upstream` remote 的 push URL 已被设为 `DISABLED`，
+   因此对第三方仓库的误推送会在本地立刻失败（`'DISABLED' does not appear to be
+   a git repository`），而不是先到网络再说。这是对第 1 条的机械保险，不是替代品：
+   真要向上游推送，需要先显式恢复 push URL，并取得逐条批准。
+3. **不重写已发布的历史。** 本约定自 2026-09-26 起对**新**提交生效；此前已推送的提交
    （例如 usbvfiod 里带 `Co-Authored-By: DeepSeek <noreply@deepseek.com>` 的那些）
    保持原样。若以后确实要回填，属于重写公开历史的操作，需要单独批准。
 
