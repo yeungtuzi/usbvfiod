@@ -1417,3 +1417,39 @@ migration outcome       : failed（随后由 VETO 终止目标端）
 > binding 模式的批次（`EXTRA_ENV="BINDING=1"`）**未跑**：它有单次 T1 PASS（`usb-b2`）、
 > 否决路径 PASS（`usb-b4`）、A5 真机 PASS（`usb-a5`）与 4 个 binding 专项测试支撑，
 > 但如果要同样强度的批次证据，只需带 `EXTRA_ENV="BINDING=1"` 再跑一遍（约 50 分钟）。
+
+## D34. 上游 PR `rust-vmm/vfio#171`：维护者确认缺陷，已按 DCO/AI 政策重开并补齐 trailer
+
+维护者 `snue` 在我们关闭 PR 之后（06:37 关闭 → 09:05 回复）留了言：
+
+> "I think this is an actual bug you found here. Thanks for raising this. The
+> descriptions are a bit verbose, but the flag inversion fix is correct. The commit
+> needs a `Signed-off-by:` from a human, and LLM use must at least be disclosed
+> through an `Assisted-by:` line."
+
+**用户批准的写入（逐条）**：① 重建分支并推送；② 重开 #171；③ 改短 PR 正文；④ 回一条简短说明。
+全部已完成，未做其它写入：
+
+| 项目 | 状态（2026-09-26 核对） |
+|---|---|
+| PR 状态 | **OPEN**，head `59bf553`，base 上游 `main`，1 file，+5/−1 |
+| 提交 trailer | `Signed-off-by: BigHippo <dahema@me.com>` + `Assisted-by: DeepSeek:deepseek-flash` |
+| DCO 检查 | **pass**（probot DCO） |
+| CI | buildkite `vfio-ioctls-ci` Build #595 running |
+| 正文 | 已改短，并按 CH 的 AI 政策在正文也带上 `Assisted-by:` |
+| 回复 | `#issuecomment-5842836393`（简短说明 trailers 已加、已 rebase） |
+
+**重开的一个坑（值得记）**：分支被删后直接 `gh pr reopen` 会失败
+（`Could not open the pull request`），因为 PR 记录的 head commit（旧的无 trailer 提交 `3a645f8`）
+已不在分支上。做法是先把分支强制指回那个旧 commit → reopen 成功 → 再把
+**rebase 到当前上游 main 的、带 trailer 的单个提交**（`59bf553`）force-push 上去。
+
+**三处代码的事实（避免以后误判）**：
+
+- 上游 `rust-vmm/vfio` main（`a38ee7a`，`vfio_user 0.1.6`）**仍然有这个缺陷**
+  （`vfio-user/src/lib.rs:517` 仍是 `!=`）→ 所以这个 PR 仍然有意义；
+- 我们 fork 的 `main`（`071388b`）**没有**这个修复；
+- 我们 fork 的 **`demo/standalone-crate`（`35dfaba`）含修复**，而 Cloud Hypervisor 的
+  `[patch.crates-io]` 正是 pin 在这个 rev 上 → **我们自己跑的所有实测都用的是修好的客户端**，
+  这也是为什么复位相关的行为一直是干净的。上游合不合并都不影响我们的可复现性；
+  将来上游发了 0.1.7，才可以把 CH 的 patch 换成上游版本。
